@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Gazebo Web</title>
+  <link rel="stylesheet" href="assets/css/gzweb.css">
+  <script src="https://cdn.jsdelivr.net/npm/protobufjs@6.11.4/dist/protobuf.min.js"></script>
+  <script src="assets/lib/eventemitter2.min.js"></script>
+  <script src="assets/lib/gz.js"></script>
+  <script src="assets/lib/gz3d.js"></script>
+  <script src="assets/js/gzweb.js"></script>
+</head>
+<body onload="init()">
+  <div id="status" onclick="toggleStatusMenu(event)" title="Waiting for Gazebo...">
+    <span id="status-text"><span class="disconnected">&#x25cf;<span class="bar-label"> Waiting for Gazebo...</span></span></span>
+    <div id="status-menu">Waiting for Gazebo...</div>
+  </div>
+  <div id="world-selector">
+    <label class="bar-label">World:</label>
+    <div class="dropdown">
+      <div id="dropdown-toggle" class="dropdown-toggle disabled" onclick="toggleDropdown()">Loading...</div>
+      <div id="dropdown-menu" class="dropdown-menu"></div>
+    </div>
+  </div>
+  <div id="settings">
+    <button id="settings-btn" onclick="toggleSettings()" title="Settings"><span class="bar-label">Settings </span><span class="settings-icon">&#x2699;</span></button>
+    <div id="settings-menu">
+      <label><input type="checkbox" id="chk-autofollow" onchange="toggleAutoFollow(this.checked); saveSettings()"> Auto Follow</label>
+      <label><input type="checkbox" id="chk-grid" onchange="toggleGrid(this.checked); saveSettings()"> Grid</label>
+      <label><input type="checkbox" id="chk-axes" onchange="toggleAxes(this.checked); saveSettings()"> TF</label>
+      <label><input type="checkbox" id="chk-lidar" onchange="toggleLidar(this.checked); saveSettings()"> LiDAR</label>
+      <label><input type="checkbox" id="chk-pose" onchange="togglePose(this.checked); saveSettings()"> Pose Info</label>
+    </div>
+  </div>
+  <div id="pose-panel"></div>
+  <div id="respawn">
+    <button id="respawn-btn" onclick="respawn()" title="Respawn physicar to initial position"><span class="bar-label">Respawn </span><span class="respawn-icon">&#x21bb;</span></button>
+  </div>
+  <div id="container"></div>
+  <div id="upload-overlay" onclick="closeUpload()"></div>
+  <div id="upload-area">
+    <span class="close" onclick="closeUpload()">&times;</span>
+    <p style="font-size: 16px; margin-bottom: 8px;">Import World</p>
+    <p style="color: #aaa; font-size: 12px; margin-bottom: 16px;">World name is determined by worlds/*.world inside the archive</p>
+    <div id="drop-zone" style="padding: 20px; border: 1px dashed #666; border-radius: 8px; margin-bottom: 12px; cursor: pointer;"
+         onclick="document.getElementById('file-input').click()">
+      <p>Drop .tar.gz here or click to browse</p>
+    </div>
+    <input type="file" id="file-input" accept=".tar.gz,.gz" onchange="handleFile(this.files[0])">
+    <div id="upload-status"></div>
+  </div>
+</body>
+</html>

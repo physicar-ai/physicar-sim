@@ -1,0 +1,52 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 AICASTLE Inc.
+#
+# physicar-sim nginx config example
+# Usage: sudo cp nginx.conf.example /etc/nginx/sites-available/gazebo
+#        sudo ln -sf /etc/nginx/sites-available/gazebo /etc/nginx/sites-enabled/
+#        sudo nginx -t && sudo nginx -s reload
+#
+# This file is not needed if you use physicar-setup.
+# (setup.sh deploys the full nginx config automatically.)
+
+server {
+    listen 8080;
+    server_name _;
+
+    client_max_body_size 500M;
+
+    location = /gz {
+        return 302 /gz/;
+    }
+
+    # 3D viewer static files (index.html, js, models, meshes)
+    location /gz/ {
+        alias __SHARE_DIR__/;
+        index index.html;
+
+        # Track assets (.world/.sdf/.dae/.png/...) reuse the same filenames
+        # across track swaps. We let the browser cache them but require
+        # revalidation on every request: nginx returns 304 (empty body) when
+        # the file's mtime/size are unchanged, and a fresh 200 the moment any
+        # asset is updated. ETag + If-Modified-Since are nginx defaults.
+        add_header Cache-Control "no-cache, must-revalidate" always;
+    }
+
+    # Sim API (world list, status, switch)
+    location /gz/api/ {
+        proxy_pass http://127.0.0.1:9003/;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header Connection "";
+    }
+
+    # Gazebo WebSocket (3D scene streaming)
+    location /gz/ws {
+        proxy_pass http://127.0.0.1:9002;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_read_timeout 86400s;
+    }
+}
