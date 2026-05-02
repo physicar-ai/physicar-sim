@@ -104,7 +104,35 @@
             </z>
           </linear_acceleration>
         </imu>
-        <pose>0 0 0.069499999999999994 0 0 0</pose>
+        <pose>0 0 0.0275 0 0 0</pose>
+        <gz_frame_id>imu_link</gz_frame_id>
+      </sensor>
+      <sensor name='mag_sensor' type='magnetometer'>
+        <always_on>true</always_on>
+        <update_rate>50</update_rate>
+        <visualize>false</visualize>
+        <topic>mag</topic>
+        <magnetometer>
+          <x>
+            <noise type='gaussian'>
+              <mean>0</mean>
+              <stddev>0.1</stddev>
+            </noise>
+          </x>
+          <y>
+            <noise type='gaussian'>
+              <mean>0</mean>
+              <stddev>0.1</stddev>
+            </noise>
+          </y>
+          <z>
+            <noise type='gaussian'>
+              <mean>0</mean>
+              <stddev>0.1</stddev>
+            </noise>
+          </z>
+        </magnetometer>
+        <pose>0 0 0.0275 0 0 0</pose>
         <gz_frame_id>imu_link</gz_frame_id>
       </sensor>
       <sensor name='lidar_sensor' type='gpu_lidar'>
@@ -648,7 +676,7 @@
       <joint_name>front_right_steering_joint</joint_name>
     </plugin>
     <frame name='imu_joint' attached_to='base_link'>
-      <pose>0 0 0.033000000000000003 0 0 0</pose>
+      <pose>0 0 0.0275 0 0 0</pose>
     </frame>
     <frame name='imu_link' attached_to='imu_joint'>
       <pose>0 0 0 0 0 0</pose>

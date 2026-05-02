@@ -1505,34 +1505,4 @@ function createGeom(g, material, parent) {
   if (obj) { if (mat) scene.setMaterial(obj, mat); obj.updateMatrix(); parent.add(obj); }
 }
 
-// =====================================================================
-// Respawn - Reset physicar to initial position
-// =====================================================================
-var _respawnInProgress = false;
 
-function respawn() {
-  if (_respawnInProgress) return;
-  _respawnInProgress = true;
-  var btn = document.getElementById('respawn-btn');
-  if (btn) {
-    btn.disabled = true;
-    btn.classList.add('loading');
-  }
-  fetch("/gz/api/respawn", { method: "POST" })
-    .then(function(r) { return r.json(); })
-    .then(function(d) {
-      if (!d.ok) {
-        console.error('Respawn failed:', d.error);
-      }
-    })
-    .catch(function(e) {
-      console.error('Respawn error:', e);
-    })
-    .finally(function() {
-      _respawnInProgress = false;
-      if (btn) {
-        btn.disabled = false;
-        btn.classList.remove('loading');
-      }
-    });
-}

@@ -254,61 +254,6 @@ def _spawn_pose(wname):
     except Exception:
         return 'position: {z: 0.05}'
 
-def _get_world_models(wname):
-    """Parse world file and return list of (model_name, pose_str) for all include models and inline models."""
-    import xml.etree.ElementTree as ET
-    path = os.path.join(WORLDS_DIR, f"{wname}.world")
-    models = []
-    try:
-        tree = ET.parse(path)
-        root = tree.getroot()
-        world_el = root.find('world')
-        if world_el is None:
-            world_el = root
-        for include in root.iter('include'):
-            name_el = include.find('name')
-            pose_el = include.find('pose')
-            uri_el = include.find('uri')
-            # Skip sun model (light source)
-            if uri_el is not None and 'sun' in uri_el.text:
-                continue
-            if name_el is not None and pose_el is not None:
-                name = name_el.text
-                pose_str = _pose_text_to_gz(pose_el.text)
-                if pose_str:
-                    models.append((name, pose_str))
-        # Inline <model> elements (3D objects like boxes, cylinders)
-        for model_el in world_el.findall('model'):
-            name = model_el.get('name', '')
-            if not name or name in ('physicar',):
-                continue
-            pose_el = model_el.find('pose')
-            if pose_el is not None:
-                pose_str = _pose_text_to_gz(pose_el.text)
-                if pose_str:
-                    models.append((name, pose_str))
-    except Exception as e:
-        logging.warning("Failed to parse world models: %s", e)
-    return models
-
-
-def _pose_text_to_gz(pose_text):
-    """Convert SDF pose text 'x y z roll pitch yaw' to gz service pose string."""
-    import math
-    pose_parts = pose_text.strip().split()
-    if len(pose_parts) < 6:
-        return None
-    x, y, z = float(pose_parts[0]), float(pose_parts[1]), float(pose_parts[2])
-    roll, pitch, yaw = float(pose_parts[3]), float(pose_parts[4]), float(pose_parts[5])
-    cy, sy = math.cos(yaw/2), math.sin(yaw/2)
-    cp, sp = math.cos(pitch/2), math.sin(pitch/2)
-    cr, sr = math.cos(roll/2), math.sin(roll/2)
-    qw = cr*cp*cy + sr*sp*sy
-    qx = sr*cp*cy - cr*sp*sy
-    qy = cr*sp*cy + sr*cp*sy
-    qz = cr*cp*sy - sr*sp*cy
-    return f'position: {{x: {x}, y: {y}, z: {z}}}, orientation: {{x: {qx}, y: {qy}, z: {qz}, w: {qw}}}'
-
 def _run_gz_cmd(*args, timeout=5):
     """Run a gz command directly (sim_api runs as physicar already)."""
     env = _gz_env()
@@ -668,37 +613,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 _launch_proc = None
                 _current_world = None
             self._json(200, {"ok": True})
-        elif self.path == "/respawn":
-            with _lock:
-                world = _current_world
-            if not world:
-                self._json(503, {"error": "no world running"})
-                return
-            errors = []
-            # Respawn physicar using route file pose
-            pose = _spawn_pose(world)
-            try:
-                result = _run_gz_cmd("gz", "service", "-s", f"/world/{world}/set_pose",
-                                     "--reqtype", "gz.msgs.Pose", "--reptype", "gz.msgs.Boolean",
-                                     "--timeout", "2000", "--req", f'name: "physicar", {pose}', timeout=5)
-                if "data: true" not in result.stdout:
-                    errors.append(f"physicar: {result.stderr or result.stdout}")
-            except Exception as e:
-                errors.append(f"physicar: {e}")
-            # Respawn all models from world file
-            for model_name, model_pose in _get_world_models(world):
-                try:
-                    result = _run_gz_cmd("gz", "service", "-s", f"/world/{world}/set_pose",
-                                         "--reqtype", "gz.msgs.Pose", "--reptype", "gz.msgs.Boolean",
-                                         "--timeout", "2000", "--req", f'name: "{model_name}", {model_pose}', timeout=5)
-                    if "data: true" not in result.stdout:
-                        errors.append(f"{model_name}: {result.stderr or result.stdout}")
-                except Exception as e:
-                    errors.append(f"{model_name}: {e}")
-            if errors:
-                self._json(207, {"ok": True, "partial": True, "errors": errors})
-            else:
-                self._json(200, {"ok": True})
         else:
             self._json(404, {"error": "not found"})
 
