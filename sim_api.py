@@ -261,6 +261,115 @@ def _run_gz_cmd(*args, timeout=5):
         list(args), env=env, timeout=timeout, capture_output=True, text=True
     )
 
+# ─── Obstacle management ──────────────────────────────────────────────
+_obstacle_lock = threading.Lock()
+_obstacle_counter = 0  # monotonic counter for unique names
+_obstacles = {}  # name -> {x, y, z, yaw}
+
+OBSTACLE_MODEL = "physicar_box_obstacle"
+OBSTACLE_Z = 0.125  # half of box height (mesh Z range: -0.121 to +0.121)
+
+def _yaw_to_quat(yaw):
+    """Convert yaw (radians) to gz.msgs quaternion string."""
+    import math
+    sz = math.sin(yaw / 2)
+    cz = math.cos(yaw / 2)
+    return f"x: 0, y: 0, z: {sz}, w: {cz}"
+
+def _spawn_obstacle(name, x, y, yaw=0.0):
+    """Spawn an obstacle in the current world."""
+    with _lock:
+        world = _current_world
+    if not world:
+        return False, "no world running"
+    quat = _yaw_to_quat(yaw)
+    pose = f'position: {{x: {x}, y: {y}, z: {OBSTACLE_Z}}}, orientation: {{{quat}}}'
+    try:
+        r = _run_gz_cmd("gz", "service", "-s", f"/world/{world}/create",
+                        "--reqtype", "gz.msgs.EntityFactory",
+                        "--reptype", "gz.msgs.Boolean",
+                        "--timeout", "5000",
+                        "--req", f'sdf_filename: "model://{OBSTACLE_MODEL}", pose: {{{pose}}}, name: "{name}"')
+        if r.returncode != 0:
+            return False, r.stderr.strip() or "gz create failed"
+        with _obstacle_lock:
+            _obstacles[name] = {"x": x, "y": y, "z": OBSTACLE_Z, "yaw": yaw}
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+def _remove_obstacle(name):
+    """Remove an obstacle from the current world."""
+    with _lock:
+        world = _current_world
+    if not world:
+        return False, "no world running"
+    try:
+        r = _run_gz_cmd("gz", "service", "-s", f"/world/{world}/remove",
+                        "--reqtype", "gz.msgs.Entity",
+                        "--reptype", "gz.msgs.Boolean",
+                        "--timeout", "5000",
+                        "--req", f'name: "{name}", type: MODEL')
+        if r.returncode != 0:
+            return False, r.stderr.strip() or "gz remove failed"
+        with _obstacle_lock:
+            _obstacles.pop(name, None)
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+def _move_obstacle(name, x, y, yaw=None):
+    """Move/rotate an obstacle by removing and re-spawning it."""
+    with _obstacle_lock:
+        info = _obstacles.get(name)
+    if not info:
+        return False, "obstacle not found"
+    if yaw is None:
+        yaw = info["yaw"]
+    ok, err = _remove_obstacle(name)
+    if not ok:
+        return False, err
+    import time as _t
+    _t.sleep(0.3)
+    return _spawn_obstacle(name, x, y, yaw)
+
+# ─── Track bounds ──────────────────────────────────────────────────────
+_track_bounds_cache = {}
+
+def _get_track_bounds(world_name):
+    """Get track surface bounds from collision mesh DAE."""
+    if world_name in _track_bounds_cache:
+        return _track_bounds_cache[world_name]
+    sdf_files = glob.glob(os.path.join(SHARE_DIR, "models", world_name, "*.sdf"))
+    if not sdf_files:
+        return None
+    try:
+        with open(sdf_files[0]) as f:
+            sdf = f.read()
+        coll = re.search(r'<collision[^>]*>(.*?)</collision>', sdf, re.DOTALL)
+        if not coll:
+            return None
+        uri = re.search(r'<uri>(?:model://)?(.+?)</uri>', coll.group(1))
+        if not uri:
+            return None
+        mesh_path = os.path.join(SHARE_DIR, uri.group(1))
+        if not os.path.isfile(mesh_path):
+            return None
+        with open(mesh_path) as f:
+            dae = f.read()
+        pos = re.search(r'<float_array[^>]*positions[^>]*>([^<]+)</float_array>', dae)
+        if not pos:
+            return None
+        vals = [float(v) for v in pos.group(1).split()]
+        if len(vals) < 6:
+            return None
+        xs, ys = vals[0::3], vals[1::3]
+        result = {"minX": min(xs), "maxX": max(xs), "minY": min(ys), "maxY": max(ys)}
+        _track_bounds_cache[world_name] = result
+        return result
+    except Exception:
+        return None
+
 def start_sim(world_file):
     """Start simulation for given world file. Kills existing sim first."""
     global _sim_proc, _current_world, _switching, _switching_since
@@ -281,6 +390,9 @@ def start_sim(world_file):
         _kill_all_gz()
         with _lock:
             _current_world = None
+        # Clear obstacles when world changes
+        with _obstacle_lock:
+            _obstacles.clear()
 
         # Start new gz sim
         env = _gz_env()
@@ -432,11 +544,41 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "current": current,
                 "switching": switching
             })
+        elif self.path == "/obstacles":
+            with _obstacle_lock:
+                obs = dict(_obstacles)
+            self._json(200, {"obstacles": obs})
+        elif self.path == "/track_bounds":
+            with _lock:
+                world = _current_world
+            if not world:
+                self._json(404, {"error": "no world running"})
+                return
+            bounds = _get_track_bounds(world)
+            if bounds:
+                self._json(200, bounds)
+            else:
+                self._json(404, {"error": "bounds not available"})
         else:
             self._json(404, {"error": "not found"})
 
     def do_POST(self):
-        if self.path == "/switch":
+        if self.path == "/obstacle":
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length)) if length else {}
+            x = float(body.get("x", 0))
+            y = float(body.get("y", 0))
+            yaw = float(body.get("yaw", 0))
+            global _obstacle_counter
+            with _obstacle_lock:
+                _obstacle_counter += 1
+                name = f"box_{_obstacle_counter}"
+            ok, err = _spawn_obstacle(name, x, y, yaw)
+            if ok:
+                self._json(200, {"ok": True, "name": name})
+            else:
+                self._json(500, {"error": err})
+        elif self.path == "/switch":
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length)) if length else {}
             world_file = body.get("world", "")
@@ -617,6 +759,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._json(404, {"error": "not found"})
 
     def do_DELETE(self):
+        m_obs = re.match(r'^/obstacle/([\w]+)$', self.path)
+        if m_obs:
+            name = m_obs.group(1)
+            ok, err = _remove_obstacle(name)
+            if ok:
+                self._json(200, {"ok": True, "removed": name})
+            else:
+                self._json(500, {"error": err})
+            return
         m = re.match(r'^/worlds/([\w]+)$', self.path)
         if m:
             world_name = m.group(1)
@@ -633,6 +784,25 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 time.sleep(2)
             _delete_world_files(world_name)
             self._json(200, {"ok": True, "deleted": world_name})
+        else:
+            self._json(404, {"error": "not found"})
+
+    def do_PATCH(self):
+        m_obs = re.match(r'^/obstacle/([\w]+)$', self.path)
+        if m_obs:
+            name = m_obs.group(1)
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length)) if length else {}
+            x = float(body.get("x", 0))
+            y = float(body.get("y", 0))
+            yaw = body.get("yaw")
+            if yaw is not None:
+                yaw = float(yaw)
+            ok, err = _move_obstacle(name, x, y, yaw)
+            if ok:
+                self._json(200, {"ok": True, "name": name})
+            else:
+                self._json(500, {"error": err})
         else:
             self._json(404, {"error": "not found"})
 

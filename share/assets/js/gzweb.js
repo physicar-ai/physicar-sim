@@ -1505,4 +1505,547 @@ function createGeom(g, material, parent) {
   if (obj) { if (mat) scene.setMaterial(obj, mat); obj.updateMatrix(); parent.add(obj); }
 }
 
+// =====================================================================
+// Box Obstacle Tool — panel-based spawn, move, rotate, delete
+// =====================================================================
+
+var _boxPanelOpen = false;
+var _boxSelected = null;     // name of selected obstacle
+var _boxDragging = false;
+var _boxRotating = false;
+var _boxDragPending = false;
+var _boxNames = {};          // name -> {x, y, yaw}
+var _boxHighlight = null;    // wireframe highlight
+var _boxPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
+var _boxRaycaster = new THREE.Raycaster();
+var _boxMouse = new THREE.Vector2();
+var _boxDragOffset = new THREE.Vector3();
+var _boxDragStartX = 0;
+var _boxDragStartY = 0;
+var _boxRotateStartX = 0;
+var _boxRotateStartYaw = 0;
+var _boxLastPatch = 0;
+var _boxTrackBounds = null;  // {minX, maxX, minY, maxY}
+var _boxPlacing = false;     // placement mode active?
+var _boxPreviewCircle = null;
+var _boxPreviewRect = null;
+var _boxPreviewOutline = null;
+var _BOX_MARGIN = 0.2;
+var _BOX_W = 0.362;          // footprint width
+var _BOX_D = 0.242;          // footprint depth
+
+// ── UI creation ──────────────────────────────────────────────────────
+
+function _createBoxUI() {
+  var btn = document.createElement('div');
+  btn.id = 'box-tool-btn';
+  btn.title = 'Box Obstacles';
+  btn.innerHTML = '&#x1f4e6;';
+  btn.onclick = function(e) { e.stopPropagation(); toggleBoxPanel(); };
+  document.body.appendChild(btn);
+
+  var panel = document.createElement('div');
+  panel.id = 'box-panel';
+  panel.innerHTML =
+    '<div class="box-panel-header">' +
+    '<span>Obstacles</span>' +
+    '<button id="box-add-btn">+ Add Box</button>' +
+    '</div>' +
+    '<div id="box-list"></div>';
+  document.body.appendChild(panel);
+
+  document.getElementById('box-add-btn').onclick = function(e) {
+    e.stopPropagation();
+    if (_boxPlacing) _cancelBoxPlacement(); else _startBoxPlacement();
+  };
+}
+
+function toggleBoxPanel() {
+  _boxPanelOpen = !_boxPanelOpen;
+  document.getElementById('box-tool-btn').classList.toggle('active', _boxPanelOpen);
+  document.getElementById('box-panel').classList.toggle('open', _boxPanelOpen);
+  if (_boxPanelOpen) {
+    _fetchTrackBounds();
+    _refreshBoxList();
+  } else {
+    _cancelBoxPlacement();
+    _deselectBox();
+  }
+}
+
+// ── Track bounds ─────────────────────────────────────────────────────
+
+function _fetchTrackBounds() {
+  fetch('/gz/api/track_bounds')
+    .then(function(r) { return r.json(); })
+    .then(function(d) { if (d.minX !== undefined) _boxTrackBounds = d; })
+    .catch(function() {});
+}
+
+function _clampToTrack(x, y) {
+  if (!_boxTrackBounds) return {x: x, y: y};
+  var b = _boxTrackBounds;
+  return {
+    x: Math.max(b.minX + _BOX_MARGIN, Math.min(b.maxX - _BOX_MARGIN, x)),
+    y: Math.max(b.minY + _BOX_MARGIN, Math.min(b.maxY - _BOX_MARGIN, y))
+  };
+}
+
+function _isInTrack(x, y) {
+  if (!_boxTrackBounds) return true;
+  var b = _boxTrackBounds;
+  return x >= b.minX + _BOX_MARGIN && x <= b.maxX - _BOX_MARGIN &&
+         y >= b.minY + _BOX_MARGIN && y <= b.maxY - _BOX_MARGIN;
+}
+
+// ── Obstacle list ────────────────────────────────────────────────────
+
+function _refreshBoxList() {
+  fetch('/gz/api/obstacles')
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      _boxNames = {};
+      var list = document.getElementById('box-list');
+      if (!list) return;
+      list.innerHTML = '';
+      var obs = d.obstacles || {};
+      var keys = Object.keys(obs).sort();
+      for (var i = 0; i < keys.length; i++) {
+        var name = keys[i];
+        _boxNames[name] = {x: obs[name].x, y: obs[name].y, yaw: obs[name].yaw || 0};
+        _appendBoxRow(name, _boxNames[name]);
+      }
+    }).catch(function() {});
+}
+
+function _appendBoxRow(name, info) {
+  var list = document.getElementById('box-list');
+  if (!list) return;
+  var row = document.createElement('div');
+  row.className = 'box-row' + (_boxSelected === name ? ' selected' : '');
+  row.dataset.name = name;
+  row.onclick = function(e) { if (e.target.tagName !== 'INPUT') _selectBox(name); };
+
+  var label = document.createElement('span');
+  label.className = 'box-name';
+  label.textContent = name;
+  row.appendChild(label);
+
+  row.appendChild(_makeCoordInput('X', info.x.toFixed(2), function(v) {
+    var nv = parseFloat(v); if (isNaN(nv)) return;
+    _boxNames[name].x = nv; _patchAndUpdate(name);
+  }));
+  row.appendChild(_makeCoordInput('Y', info.y.toFixed(2), function(v) {
+    var nv = parseFloat(v); if (isNaN(nv)) return;
+    _boxNames[name].y = nv; _patchAndUpdate(name);
+  }));
+  row.appendChild(_makeCoordInput('\u00b0', (info.yaw * 180 / Math.PI).toFixed(0), function(v) {
+    var nv = parseFloat(v); if (isNaN(nv)) return;
+    _boxNames[name].yaw = nv * Math.PI / 180; _patchAndUpdate(name);
+  }));
+
+  var del = document.createElement('span');
+  del.className = 'box-del';
+  del.innerHTML = '&times;';
+  del.title = 'Delete ' + name;
+  del.onclick = function(e) { e.stopPropagation(); _deleteObstacle(name); };
+  row.appendChild(del);
+
+  list.appendChild(row);
+}
+
+function _makeCoordInput(lbl, value, onChange) {
+  var wrap = document.createElement('label');
+  wrap.className = 'box-coord';
+  var sp = document.createElement('span');
+  sp.textContent = lbl;
+  wrap.appendChild(sp);
+  var inp = document.createElement('input');
+  inp.type = 'number';
+  inp.step = lbl === '\u00b0' ? '1' : '0.01';
+  inp.value = value;
+  inp.onchange = function() { onChange(inp.value); };
+  inp.onkeydown = function(e) { e.stopPropagation(); };
+  wrap.appendChild(inp);
+  return wrap;
+}
+
+function _patchAndUpdate(name) {
+  var info = _boxNames[name];
+  if (!info) return;
+  var clamped = _clampToTrack(info.x, info.y);
+  info.x = clamped.x; info.y = clamped.y;
+  var obj = scene.getByName(name);
+  if (obj) {
+    obj.position.x = info.x;
+    obj.position.y = info.y;
+    obj.quaternion.setFromAxisAngle(new THREE.Vector3(0, 0, 1), info.yaw);
+  }
+  _updateBoxHighlight();
+  _patchObstacle(name, info.x, info.y, info.yaw);
+}
+
+function _updateBoxRow(name, x, y, yaw) {
+  if (_boxNames[name]) { _boxNames[name].x = x; _boxNames[name].y = y; _boxNames[name].yaw = yaw; }
+  var row = document.querySelector('.box-row[data-name="' + name + '"]');
+  if (!row) return;
+  var inputs = row.querySelectorAll('input');
+  if (inputs[0]) inputs[0].value = x.toFixed(2);
+  if (inputs[1]) inputs[1].value = y.toFixed(2);
+  if (inputs[2]) inputs[2].value = (yaw * 180 / Math.PI).toFixed(0);
+}
+
+// ── Placement mode ───────────────────────────────────────────────────
+
+function _startBoxPlacement() {
+  _boxPlacing = true;
+  _deselectBox();
+  document.getElementById('box-add-btn').classList.add('placing');
+  document.getElementById('box-add-btn').textContent = 'Cancel';
+
+  // Create preview meshes (once, reuse)
+  if (!_boxPreviewCircle) {
+    var cg = new THREE.CircleGeometry(0.18, 32);
+    var cm = new THREE.MeshBasicMaterial({color: 0x888888, transparent: true, opacity: 0.35, side: THREE.DoubleSide, depthTest: false});
+    _boxPreviewCircle = new THREE.Mesh(cg, cm);
+    _boxPreviewCircle.renderOrder = 990;
+    _boxPreviewCircle.position.z = 0.005;
+    scene.scene.add(_boxPreviewCircle);
+  }
+  _boxPreviewCircle.visible = false;
+
+  if (!_boxPreviewRect) {
+    var rg = new THREE.PlaneGeometry(_BOX_W, _BOX_D);
+    var rm = new THREE.MeshBasicMaterial({color: 0x4ade80, transparent: true, opacity: 0.2, side: THREE.DoubleSide, depthTest: false});
+    _boxPreviewRect = new THREE.Mesh(rg, rm);
+    _boxPreviewRect.renderOrder = 991;
+    _boxPreviewRect.position.z = 0.006;
+    scene.scene.add(_boxPreviewRect);
+  }
+  _boxPreviewRect.visible = false;
+
+  if (!_boxPreviewOutline) {
+    var og = new THREE.EdgesGeometry(new THREE.PlaneGeometry(_BOX_W, _BOX_D));
+    var om = new THREE.LineBasicMaterial({color: 0x4ade80, transparent: true, opacity: 0.8, depthTest: false});
+    _boxPreviewOutline = new THREE.LineSegments(og, om);
+    _boxPreviewOutline.renderOrder = 992;
+    _boxPreviewOutline.position.z = 0.007;
+    scene.scene.add(_boxPreviewOutline);
+  }
+  _boxPreviewOutline.visible = false;
+
+  scene.renderer.domElement.style.cursor = 'crosshair';
+}
+
+function _cancelBoxPlacement() {
+  if (!_boxPlacing) return;
+  _boxPlacing = false;
+  var btn = document.getElementById('box-add-btn');
+  if (btn) { btn.classList.remove('placing'); btn.textContent = '+ Add Box'; }
+  if (_boxPreviewCircle) _boxPreviewCircle.visible = false;
+  if (_boxPreviewRect) _boxPreviewRect.visible = false;
+  if (_boxPreviewOutline) _boxPreviewOutline.visible = false;
+  scene.renderer.domElement.style.cursor = '';
+}
+
+function _updatePlacementPreview(event) {
+  var hit = _groundIntersect(event);
+  if (!hit) {
+    if (_boxPreviewCircle) _boxPreviewCircle.visible = false;
+    if (_boxPreviewRect) _boxPreviewRect.visible = false;
+    if (_boxPreviewOutline) _boxPreviewOutline.visible = false;
+    return;
+  }
+  var inBounds = _isInTrack(hit.x, hit.y);
+  var pos = _clampToTrack(hit.x, hit.y);
+  var color = inBounds ? 0x4ade80 : 0xf87171;
+
+  if (_boxPreviewCircle) {
+    _boxPreviewCircle.position.x = hit.x;
+    _boxPreviewCircle.position.y = hit.y;
+    _boxPreviewCircle.visible = true;
+  }
+  if (_boxPreviewRect) {
+    _boxPreviewRect.position.x = pos.x;
+    _boxPreviewRect.position.y = pos.y;
+    _boxPreviewRect.material.color.setHex(color);
+    _boxPreviewRect.visible = true;
+  }
+  if (_boxPreviewOutline) {
+    _boxPreviewOutline.position.x = pos.x;
+    _boxPreviewOutline.position.y = pos.y;
+    _boxPreviewOutline.material.color.setHex(color);
+    _boxPreviewOutline.visible = true;
+  }
+}
+
+// ── Selection & highlight ────────────────────────────────────────────
+
+function _selectBox(name) {
+  _deselectBox();
+  _boxSelected = name;
+  _updateBoxHighlight();
+  var rows = document.querySelectorAll('.box-row');
+  for (var i = 0; i < rows.length; i++)
+    rows[i].classList.toggle('selected', rows[i].dataset.name === name);
+}
+
+function _deselectBox() {
+  _boxSelected = null;
+  if (_boxHighlight) {
+    scene.scene.remove(_boxHighlight);
+    _boxHighlight.geometry.dispose();
+    _boxHighlight.material.dispose();
+    _boxHighlight = null;
+  }
+  var rows = document.querySelectorAll('.box-row');
+  for (var i = 0; i < rows.length; i++) rows[i].classList.remove('selected');
+}
+
+function _updateBoxHighlight() {
+  if (_boxHighlight) {
+    scene.scene.remove(_boxHighlight);
+    _boxHighlight.geometry.dispose();
+    _boxHighlight.material.dispose();
+    _boxHighlight = null;
+  }
+  if (!_boxSelected) return;
+  var obj = scene.getByName(_boxSelected);
+  if (!obj) return;
+  var bbox = new THREE.Box3().setFromObject(obj);
+  var size = bbox.getSize(new THREE.Vector3());
+  var center = bbox.getCenter(new THREE.Vector3());
+  var geom = new THREE.BoxGeometry(size.x * 1.05, size.y * 1.05, size.z * 1.05);
+  var edges = new THREE.EdgesGeometry(geom);
+  _boxHighlight = new THREE.LineSegments(edges,
+    new THREE.LineBasicMaterial({color: 0x00ff88, linewidth: 2, depthTest: false, transparent: true, opacity: 0.8}));
+  _boxHighlight.renderOrder = 999;
+  _boxHighlight.position.copy(center);
+  scene.scene.add(_boxHighlight);
+}
+
+// ── Raycasting ───────────────────────────────────────────────────────
+
+function _groundIntersect(event) {
+  var rect = scene.renderer.domElement.getBoundingClientRect();
+  _boxMouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+  _boxMouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+  _boxRaycaster.setFromCamera(_boxMouse, scene.camera);
+  var hit = new THREE.Vector3();
+  return _boxRaycaster.ray.intersectPlane(_boxPlane, hit) ? hit : null;
+}
+
+function _findBoxAtMouse(event) {
+  var rect = scene.renderer.domElement.getBoundingClientRect();
+  _boxMouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+  _boxMouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+  _boxRaycaster.setFromCamera(_boxMouse, scene.camera);
+  var targets = [];
+  for (var name in _boxNames) {
+    var obj = scene.getByName(name);
+    if (obj) obj.traverse(function(child) {
+      if (child.isMesh) { child._boxObstacleName = name; targets.push(child); }
+    });
+  }
+  if (targets.length === 0) return null;
+  var hits = _boxRaycaster.intersectObjects(targets, false);
+  return hits.length > 0 ? hits[0].object._boxObstacleName : null;
+}
+
+// ── Mouse & keyboard handlers ────────────────────────────────────────
+
+function _boxOnMouseDown(event) {
+  if (!_boxPanelOpen) return;
+  if (event.target !== scene.renderer.domElement) return;
+
+  // Placement mode
+  if (_boxPlacing) {
+    if (event.button === 0) {
+      var hit = _groundIntersect(event);
+      if (hit) {
+        var pos = _clampToTrack(hit.x, hit.y);
+        _spawnBoxAtPosition(pos.x, pos.y);
+        _cancelBoxPlacement();
+      }
+      event.preventDefault(); event.stopPropagation();
+    } else if (event.button === 2) {
+      _cancelBoxPlacement();
+      event.preventDefault(); event.stopPropagation();
+    }
+    return;
+  }
+
+  // Normal mode — select / drag / rotate
+  if (event.button === 0) {
+    var found = _findBoxAtMouse(event);
+    if (found) {
+      _selectBox(found);
+      _boxDragPending = true;
+      _boxDragStartX = event.clientX;
+      _boxDragStartY = event.clientY;
+      var hit = _groundIntersect(event);
+      var obj = scene.getByName(found);
+      if (hit && obj) {
+        var pos = new THREE.Vector3();
+        obj.getWorldPosition(pos);
+        _boxDragOffset.copy(pos).sub(hit);
+      }
+      event.preventDefault(); event.stopPropagation();
+    } else {
+      _deselectBox();
+    }
+  } else if (event.button === 2 && _boxSelected) {
+    var found = _findBoxAtMouse(event);
+    if (found === _boxSelected) {
+      _boxRotating = true;
+      _boxRotateStartX = event.clientX;
+      var obj = scene.getByName(found);
+      if (obj) {
+        var euler = new THREE.Euler().setFromQuaternion(obj.quaternion, 'ZYX');
+        _boxRotateStartYaw = euler.z;
+      }
+      event.preventDefault(); event.stopPropagation();
+    }
+  }
+}
+
+function _boxOnMouseMove(event) {
+  if (!_boxPanelOpen) return;
+
+  if (_boxPlacing) { _updatePlacementPreview(event); return; }
+
+  // Start drag after threshold
+  if (_boxDragPending && _boxSelected) {
+    if (Math.abs(event.clientX - _boxDragStartX) + Math.abs(event.clientY - _boxDragStartY) > 4) {
+      _boxDragging = true;
+      _boxDragPending = false;
+      if (!_autoFollow) scene.controls.enabled = false;
+    }
+  }
+
+  if (_boxDragging && _boxSelected) {
+    var hit = _groundIntersect(event);
+    if (hit) {
+      var pos = _clampToTrack(hit.x + _boxDragOffset.x, hit.y + _boxDragOffset.y);
+      var obj = scene.getByName(_boxSelected);
+      if (obj) { obj.position.x = pos.x; obj.position.y = pos.y; }
+      _updateBoxHighlight();
+      var now = Date.now();
+      if (now - _boxLastPatch > 200) {
+        _boxLastPatch = now;
+        _patchObstacle(_boxSelected, pos.x, pos.y, null);
+      }
+    }
+    event.preventDefault(); event.stopPropagation();
+  }
+
+  if (_boxRotating && _boxSelected) {
+    var dx = event.clientX - _boxRotateStartX;
+    var yaw = _boxRotateStartYaw + dx * 0.01;
+    var obj = scene.getByName(_boxSelected);
+    if (obj) obj.quaternion.setFromAxisAngle(new THREE.Vector3(0, 0, 1), yaw);
+    _updateBoxHighlight();
+    event.preventDefault(); event.stopPropagation();
+  }
+}
+
+function _boxOnMouseUp(event) {
+  if (!_boxPanelOpen) return;
+
+  if (_boxDragPending) { _boxDragPending = false; return; }
+
+  if (_boxDragging && _boxSelected) {
+    var obj = scene.getByName(_boxSelected);
+    if (obj) {
+      var euler = new THREE.Euler().setFromQuaternion(obj.quaternion, 'ZYX');
+      var pos = _clampToTrack(obj.position.x, obj.position.y);
+      _patchObstacle(_boxSelected, pos.x, pos.y, euler.z);
+      _updateBoxRow(_boxSelected, pos.x, pos.y, euler.z);
+    }
+    _boxDragging = false;
+    if (!_autoFollow) scene.controls.enabled = true;
+  }
+
+  if (_boxRotating && _boxSelected) {
+    var obj = scene.getByName(_boxSelected);
+    if (obj) {
+      var euler = new THREE.Euler().setFromQuaternion(obj.quaternion, 'ZYX');
+      _patchObstacle(_boxSelected, obj.position.x, obj.position.y, euler.z);
+      _updateBoxRow(_boxSelected, obj.position.x, obj.position.y, euler.z);
+    }
+    _boxRotating = false;
+    if (!_autoFollow) scene.controls.enabled = true;
+  }
+}
+
+function _boxOnKeyDown(event) {
+  if (!_boxPanelOpen) return;
+  if (event.key === 'Escape') {
+    if (_boxPlacing) { _cancelBoxPlacement(); event.preventDefault(); }
+    else if (_boxSelected) { _deselectBox(); event.preventDefault(); }
+    return;
+  }
+  if (!_boxSelected) return;
+  if ((event.key === 'Delete' || event.key === 'Backspace') && event.target.tagName !== 'INPUT') {
+    _deleteObstacle(_boxSelected);
+    _deselectBox();
+    event.preventDefault();
+  }
+}
+
+function _boxOnContextMenu(event) {
+  if (_boxPanelOpen && (_boxPlacing || _boxRotating)) event.preventDefault();
+}
+
+// ── API calls ────────────────────────────────────────────────────────
+
+function _spawnBoxAtPosition(x, y) {
+  fetch('/gz/api/obstacle', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({x: x, y: y, yaw: 0})
+  }).then(function(r) { return r.json(); }).then(function(d) {
+    if (d.ok) {
+      _boxNames[d.name] = {x: x, y: y, yaw: 0};
+      _appendBoxRow(d.name, _boxNames[d.name]);
+      setTimeout(function() { _selectBox(d.name); }, 1000);
+    }
+  }).catch(function(e) { console.error('[Box] spawn error:', e); });
+}
+
+function _deleteObstacle(name) {
+  fetch('/gz/api/obstacle/' + name, {method: 'DELETE'})
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (d.ok) {
+        delete _boxNames[name];
+        var row = document.querySelector('.box-row[data-name="' + name + '"]');
+        if (row) row.remove();
+        if (_boxSelected === name) _deselectBox();
+      }
+    }).catch(function(e) { console.error('[Box] delete error:', e); });
+}
+
+function _patchObstacle(name, x, y, yaw) {
+  var body = {x: x, y: y};
+  if (yaw !== null && yaw !== undefined) body.yaw = yaw;
+  fetch('/gz/api/obstacle/' + name, {
+    method: 'PATCH',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body)
+  }).catch(function(e) { console.error('[Box] patch error:', e); });
+}
+
+// ── Init ─────────────────────────────────────────────────────────────
+
+window.addEventListener('load', function() {
+  _createBoxUI();
+  var el = document.getElementById('container');
+  el.addEventListener('mousedown', _boxOnMouseDown, true);
+  el.addEventListener('mousemove', _boxOnMouseMove, true);
+  el.addEventListener('mouseup', _boxOnMouseUp, true);
+  el.addEventListener('contextmenu', _boxOnContextMenu, true);
+  document.addEventListener('keydown', _boxOnKeyDown);
+});
+
 
