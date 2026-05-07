@@ -167,6 +167,9 @@ _switching_since = 0.0
 _SWITCH_TIMEOUT = 90    # seconds — force-reset if switching takes longer
 _fail_count = 0         # consecutive watchdog restart failures
 _MAX_FAILS = 5          # give up auto-restart after this many
+_health_counter = 0     # watchdog health-check cycle counter
+_HEALTH_INTERVAL = 2    # check gz-transport every N watchdog ticks (5s × 2 = 10s)
+_HEALTH_TIMEOUT = 8     # seconds to wait for gz topic -l response
 WEBSOCKET_LAUNCH = os.path.join(SIM_DIR, "websocket.gzlaunch")
 
 def _gz_env():
@@ -394,7 +397,7 @@ def start_sim(world_file):
         with _obstacle_lock:
             _obstacles.clear()
 
-        # Start new gz sim
+        # Start new gz sim (renice after start for higher CPU priority)
         env = _gz_env()
         proc = subprocess.Popen(
             ["gz", "sim", "-s", "--headless-rendering", path],
@@ -402,6 +405,14 @@ def start_sim(world_file):
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             start_new_session=True
         )
+        # Elevate CPU priority to prevent starvation under load
+        try:
+            subprocess.run(
+                ["sudo", "renice", "-n", "-5", "-p", str(proc.pid)],
+                timeout=3, capture_output=True
+            )
+        except Exception:
+            pass
         logging.info("gz sim started (PID %d)", proc.pid)
 
         with _lock:
@@ -460,11 +471,30 @@ def start_sim(world_file):
             _switching = False
         return False
 
+def _check_gz_transport_health(world):
+    """Check if gz-transport is responsive by querying topic list.
+    Returns True if healthy, False if unresponsive."""
+    try:
+        r = subprocess.run(
+            ["gz", "topic", "-l"],
+            env=_gz_env(), capture_output=True, text=True,
+            timeout=_HEALTH_TIMEOUT
+        )
+        if r.returncode != 0 or not r.stdout.strip():
+            return False
+        # Verify the world's clock topic exists (proof sim is actually running)
+        if world and f"/world/{world}/clock" not in r.stdout:
+            return False
+        return True
+    except subprocess.TimeoutExpired:
+        return False
+    except Exception:
+        return False
+
 def _watchdog():
-    """Monitor gz sim + gz-launch. Restart on crash with backoff."""
-    global _switching
+    """Monitor gz sim + gz-launch. Restart on crash or hung state."""
+    global _switching, _fail_count, _health_counter
     logging.info("watchdog started")
-    global _fail_count
     while True:
         time.sleep(5)
         try:
@@ -487,6 +517,18 @@ def _watchdog():
             launch_alive = launch is not None and launch.poll() is None
 
             if sim_alive and launch_alive:
+                # Process alive — but is gz-transport actually responsive?
+                _health_counter += 1
+                if _health_counter % _HEALTH_INTERVAL == 0:
+                    if not _check_gz_transport_health(world):
+                        logging.warning(
+                            "gz sim (PID %d) alive but gz-transport unresponsive, restarting",
+                            proc.pid
+                        )
+                        wfile = (world or "physicar_base") + ".world"
+                        if os.path.isfile(os.path.join(WORLDS_DIR, wfile)):
+                            start_sim(wfile)
+                        continue
                 _fail_count = 0
                 continue
 
