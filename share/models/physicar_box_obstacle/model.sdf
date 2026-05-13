@@ -19,17 +19,20 @@
       <collision name='collision'>
         <pose frame="">0 0 0 0 0 0</pose>
         <geometry>
-          <mesh>
-            <scale>1.0 1.0 1.0</scale>
-            <uri>model://meshes/physicar_box_obstacle/physicar_box_obstacle.dae</uri>
-          </mesh>
+          <box>
+            <size>0.362 0.242 0.25</size>
+          </box>
         </geometry>
         <surface>
         <contact>
-          <!-- Make sure the collision between botcar and any of the obstacles is not considered -->
-          <!-- https://classic.gazebosim.org/tutorials?tut=collide_bitmask&cat=physics -->
           <collide_bitmask>0x7FFF</collide_bitmask>
         </contact>
+        <friction>
+          <ode>
+            <mu>0.8</mu>
+            <mu2>0.8</mu2>
+          </ode>
+        </friction>
         </surface>
       </collision>
       <pose frame="">0 0 0 0 0 0</pose>
