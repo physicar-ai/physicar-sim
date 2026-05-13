@@ -120,6 +120,9 @@ body { background: #1a1a2e; color: #eee; font-family: sans-serif; overflow: hidd
                padding: 4px 10px; font-size: 12px; cursor: pointer; transition: background 0.15s; }
 #box-add-btn:hover { background: #2563eb; }
 #box-add-btn.placing { background: #f59e0b; }
+#box-respawn-btn { background: transparent; color: #aaa; border: 1px solid #555; border-radius: 4px;
+                   padding: 4px 8px; font-size: 12px; cursor: pointer; transition: all 0.15s; }
+#box-respawn-btn:hover { background: rgba(255,255,255,0.1); color: #fff; border-color: #888; }
 #box-list { overflow-y: auto; max-height: 260px; padding: 4px 0; }
 #box-list:empty::after { content: 'No obstacles'; display: block; text-align: center;
                          color: #666; padding: 16px; font-size: 12px; }
@@ -131,7 +134,7 @@ body { background: #1a1a2e; color: #eee; font-family: sans-serif; overflow: hidd
             text-overflow: ellipsis; white-space: nowrap; flex-shrink: 0; }
 .box-coord { display: flex; align-items: center; gap: 1px; flex-shrink: 0; }
 .box-coord span { font-size: 10px; color: #666; width: 11px; text-align: center; }
-.box-coord input { width: 44px; background: #1a1a2e; color: #eee; border: 1px solid #444;
+.box-coord input { width: 46px; background: #1a1a2e; color: #eee; border: 1px solid #444;
                    border-radius: 3px; padding: 2px 3px; font-size: 11px; font-family: monospace;
                    text-align: right; }
 .box-coord input:focus { border-color: #4ade80; outline: none; }
@@ -139,4 +142,22 @@ body { background: #1a1a2e; color: #eee; font-family: sans-serif; overflow: hidd
            flex-shrink: 0; line-height: 1; margin-left: auto; }
 .box-del:hover { color: #f87171; }
 
+/* Toast notification */
+#gz-toast { position: fixed; bottom: 80px; left: 50%; transform: translateX(-50%);
+            background: rgba(0,0,0,0.85); color: #fff; padding: 10px 20px;
+            border-radius: 8px; font-size: 13px; z-index: 9999;
+            opacity: 0; pointer-events: none; transition: opacity 0.3s;
+            max-width: 90%; text-align: center; }
+#gz-toast.show { opacity: 1; }
+
+/* Audio unlock overlay */
+#audio-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+                 background: rgba(0,0,0,0.6); z-index: 9998;
+                 display: flex; align-items: center; justify-content: center;
+                 opacity: 0; pointer-events: none; transition: opacity 0.3s; cursor: pointer; }
+#audio-overlay.show { opacity: 1; pointer-events: auto; }
+.audio-overlay-content { background: rgba(30,30,50,0.95); padding: 30px 40px;
+                         border-radius: 12px; text-align: center;
+                         font-size: 18px; line-height: 1.6; color: #fff; }
+.audio-overlay-content span { font-size: 13px; color: #aaa; }
 

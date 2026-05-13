@@ -14,6 +14,59 @@ var reconnectTimer = null;
 var connected = false;
 
 // =====================================================================
+// Toast Notification
+// =====================================================================
+var _toastTimer = null;
+function _showToast(msg, duration) {
+  duration = duration || 3000;
+  var el = document.getElementById('gz-toast');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'gz-toast';
+    document.body.appendChild(el);
+  }
+  el.textContent = msg;
+  el.classList.add('show');
+  if (_toastTimer) clearTimeout(_toastTimer);
+  _toastTimer = setTimeout(function() { el.classList.remove('show'); }, duration);
+}
+
+// =====================================================================
+// Audio Unlock Overlay
+// =====================================================================
+var _audioUnlocked = false;
+function _checkAudioOverlay() {
+  if (_audioUnlocked) return;
+  // Show overlay if audio data is pending but not yet unlocked
+  if (_audioPending && _audioPending.length > 0 && !_audioReady) {
+    var el = document.getElementById('audio-overlay');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'audio-overlay';
+      el.innerHTML = '<div class="audio-overlay-content">🔊 Audio is playing<br><span>Click anywhere to unmute</span></div>';
+      el.onclick = function() {
+        _onUserGesture();
+        el.classList.remove('show');
+        _audioUnlocked = true;
+      };
+      document.body.appendChild(el);
+    }
+    el.classList.add('show');
+  }
+}
+// Check periodically until unlocked
+var _audioOverlayCheck = setInterval(function() {
+  if (_audioReady || _audioUnlocked) {
+    _audioUnlocked = true;
+    var el = document.getElementById('audio-overlay');
+    if (el) el.classList.remove('show');
+    clearInterval(_audioOverlayCheck);
+    return;
+  }
+  _checkAudioOverlay();
+}, 500);
+
+// =====================================================================
 // Scene Management
 // =====================================================================
 
@@ -116,6 +169,8 @@ function connect() {
     document.getElementById("status-menu").textContent = "RTF: --";
     // Sync world list on every (re)connect
     loadWorlds();
+    // Refresh obstacle list after reconnect (world may have reloaded)
+    setTimeout(function() { if (_boxPanelOpen) _refreshBoxList(); }, 2000);
   });
   
   gz.on("close", function() {
@@ -274,7 +329,10 @@ function connect() {
           for (var j = 0; j < msg.pose.length; ++j) {
             var p = msg.pose[j];
             var e = scene.getByName(p.name);
-            if (e && e !== scene.modelManipulator.object && e.parent !== scene.modelManipulator.object) {
+            if (e && e !== scene.modelManipulator.object && e.parent !== scene.modelManipulator.object
+                && !(_boxDragging && p.name === _boxSelected)
+                && !(_boxRotating && p.name === _boxSelected)
+                && !(p.name === _boxPoseName && Date.now() < _boxPoseUntil)) {
               scene.updatePose(e, p.position, p.orientation);
             } else if (!e && !knownModels[p.name] && p.name !== currentWorld) {
               needRefresh = true;
@@ -1030,6 +1088,11 @@ function toggleStatusMenu(e) {
 }
 
 function _afMouseDown(e) {
+  if (e.button === 2) {
+    _showToast('Panning is not supported in Auto Follow mode.');
+    document.getElementById("settings-menu").classList.add("open");
+    return;
+  }
   if (e.button !== 0) return; // left click only
   _af.dragging = true;
   _af.lastX = e.clientX;
@@ -1524,7 +1587,8 @@ var _boxDragStartX = 0;
 var _boxDragStartY = 0;
 var _boxRotateStartX = 0;
 var _boxRotateStartYaw = 0;
-var _boxLastPatch = 0;
+var _boxPoseUntil = 0;       // suppress server pose until this timestamp
+var _boxPoseName = null;     // name being suppressed
 var _boxTrackBounds = null;  // {minX, maxX, minY, maxY}
 var _boxPlacing = false;     // placement mode active?
 var _boxPreviewCircle = null;
@@ -1533,6 +1597,7 @@ var _boxPreviewOutline = null;
 var _BOX_MARGIN = 0.2;
 var _BOX_W = 0.362;          // footprint width
 var _BOX_D = 0.242;          // footprint depth
+var _boxRotArc = null;       // rotation arc handle mesh
 
 // ── UI creation ──────────────────────────────────────────────────────
 
@@ -1544,12 +1609,28 @@ function _createBoxUI() {
   btn.onclick = function(e) { e.stopPropagation(); toggleBoxPanel(); };
   document.body.appendChild(btn);
 
+  // Close panel when clicking outside
+  document.addEventListener('mousedown', function(e) {
+    if (!_boxPanelOpen) return;
+    var panel = document.getElementById('box-panel');
+    var toolBtn = document.getElementById('box-tool-btn');
+    if (panel && !panel.contains(e.target) && !toolBtn.contains(e.target)
+        && e.target === scene.renderer.domElement) {
+      // Don't close if clicking on a box (will select it instead)
+      var found = _findBoxAtMouse(e);
+      if (!found && !_boxPlacing) toggleBoxPanel();
+    }
+  });
+
   var panel = document.createElement('div');
   panel.id = 'box-panel';
   panel.innerHTML =
     '<div class="box-panel-header">' +
     '<span>Obstacles</span>' +
-    '<button id="box-add-btn">+ Add Box</button>' +
+    '<div style="display:flex;gap:4px">' +
+    '<button id="box-add-btn">+ Add</button>' +
+    '<button id="box-respawn-btn" title="Respawn all boxes to saved positions">&#x21bb; Respawn</button>' +
+    '</div>' +
     '</div>' +
     '<div id="box-list"></div>';
   document.body.appendChild(panel);
@@ -1557,6 +1638,10 @@ function _createBoxUI() {
   document.getElementById('box-add-btn').onclick = function(e) {
     e.stopPropagation();
     if (_boxPlacing) _cancelBoxPlacement(); else _startBoxPlacement();
+  };
+  document.getElementById('box-respawn-btn').onclick = function(e) {
+    e.stopPropagation();
+    _respawnAllBoxes();
   };
 }
 
@@ -1604,17 +1689,27 @@ function _refreshBoxList() {
   fetch('/gz/api/obstacles')
     .then(function(r) { return r.json(); })
     .then(function(d) {
+      var oldNames = Object.keys(_boxNames);
       _boxNames = {};
       var list = document.getElementById('box-list');
       if (!list) return;
       list.innerHTML = '';
       var obs = d.obstacles || {};
       var keys = Object.keys(obs).sort();
+      var newSet = {};
       for (var i = 0; i < keys.length; i++) {
         var name = keys[i];
+        newSet[name] = true;
         _boxNames[name] = {x: obs[name].x, y: obs[name].y, yaw: obs[name].yaw || 0};
         _appendBoxRow(name, _boxNames[name]);
       }
+      // Remove scene objects for obstacles deleted in other windows
+      for (var j = 0; j < oldNames.length; j++) {
+        if (!newSet[oldNames[j]]) {
+          _removeBoxFromScene(oldNames[j]);
+        }
+      }
+      if (_boxSelected && !newSet[_boxSelected]) _deselectBox();
     }).catch(function() {});
 }
 
@@ -1646,8 +1741,10 @@ function _appendBoxRow(name, info) {
 
   var del = document.createElement('span');
   del.className = 'box-del';
-  del.innerHTML = '&times;';
+  del.innerHTML = '&#x1f5d1;';
   del.title = 'Delete ' + name;
+  del.style.color = '#e53935';
+  del.style.cursor = 'pointer';
   del.onclick = function(e) { e.stopPropagation(); _deleteObstacle(name); };
   row.appendChild(del);
 
@@ -1798,6 +1895,12 @@ function _deselectBox() {
     _boxHighlight.material.dispose();
     _boxHighlight = null;
   }
+  if (_boxRotArc) {
+    scene.scene.remove(_boxRotArc);
+    _boxRotArc.geometry.dispose();
+    _boxRotArc.material.dispose();
+    _boxRotArc = null;
+  }
   var rows = document.querySelectorAll('.box-row');
   for (var i = 0; i < rows.length; i++) rows[i].classList.remove('selected');
 }
@@ -1809,19 +1912,37 @@ function _updateBoxHighlight() {
     _boxHighlight.material.dispose();
     _boxHighlight = null;
   }
+  if (_boxRotArc) {
+    scene.scene.remove(_boxRotArc);
+    _boxRotArc.geometry.dispose();
+    _boxRotArc.material.dispose();
+    _boxRotArc = null;
+  }
   if (!_boxSelected) return;
   var obj = scene.getByName(_boxSelected);
   if (!obj) return;
-  var bbox = new THREE.Box3().setFromObject(obj);
-  var size = bbox.getSize(new THREE.Vector3());
-  var center = bbox.getCenter(new THREE.Vector3());
-  var geom = new THREE.BoxGeometry(size.x * 1.05, size.y * 1.05, size.z * 1.05);
+  var wp = new THREE.Vector3();
+  obj.getWorldPosition(wp);
+  // Use fixed box size (oriented with the object) instead of axis-aligned bounding box
+  var w = _BOX_W * 1.08;
+  var d = _BOX_D * 1.08;
+  var h = 0.18 * 1.08;
+  var geom = new THREE.BoxGeometry(w, d, h);
   var edges = new THREE.EdgesGeometry(geom);
   _boxHighlight = new THREE.LineSegments(edges,
     new THREE.LineBasicMaterial({color: 0x00ff88, linewidth: 2, depthTest: false, transparent: true, opacity: 0.8}));
   _boxHighlight.renderOrder = 999;
-  _boxHighlight.position.copy(center);
+  _boxHighlight.position.set(wp.x, wp.y, 0.09);
+  _boxHighlight.quaternion.copy(obj.quaternion);
   scene.scene.add(_boxHighlight);
+  // Rotation arc handle
+  var arcGeom = new THREE.RingGeometry(0.22, 0.24, 32, 1, 0, Math.PI * 1.5);
+  _boxRotArc = new THREE.Mesh(arcGeom,
+    new THREE.MeshBasicMaterial({color: 0xffaa00, side: THREE.DoubleSide, depthTest: false, transparent: true, opacity: 0.7}));
+  _boxRotArc.renderOrder = 999;
+  _boxRotArc.position.set(wp.x, wp.y, 0.18);
+  _boxRotArc.quaternion.copy(obj.quaternion);
+  scene.scene.add(_boxRotArc);
 }
 
 // ── Raycasting ───────────────────────────────────────────────────────
@@ -1855,8 +1976,20 @@ function _findBoxAtMouse(event) {
 // ── Mouse & keyboard handlers ────────────────────────────────────────
 
 function _boxOnMouseDown(event) {
-  if (!_boxPanelOpen) return;
   if (event.target !== scene.renderer.domElement) return;
+
+  // If panel is not open, still allow selecting boxes on click
+  if (!_boxPanelOpen) {
+    if (event.button === 0) {
+      var found = _findBoxAtMouse(event);
+      if (found) {
+        toggleBoxPanel();
+        setTimeout(function() { _selectBox(found); }, 50);
+        event.preventDefault(); event.stopPropagation();
+      }
+    }
+    return;
+  }
 
   // Placement mode
   if (_boxPlacing) {
@@ -1877,6 +2010,26 @@ function _boxOnMouseDown(event) {
 
   // Normal mode — select / drag / rotate
   if (event.button === 0) {
+    // Check if clicking rotation arc handle
+    if (_boxSelected && _boxRotArc) {
+      var rect = scene.renderer.domElement.getBoundingClientRect();
+      _boxMouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+      _boxMouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+      _boxRaycaster.setFromCamera(_boxMouse, scene.camera);
+      var arcHits = _boxRaycaster.intersectObject(_boxRotArc, false);
+      if (arcHits.length > 0) {
+        _boxRotating = true;
+        _boxRotateStartX = event.clientX;
+        var obj = scene.getByName(_boxSelected);
+        if (obj) {
+          var euler = new THREE.Euler().setFromQuaternion(obj.quaternion, 'ZYX');
+          _boxRotateStartYaw = euler.z;
+        }
+        if (!_autoFollow) scene.controls.enabled = false;
+        event.preventDefault(); event.stopPropagation();
+        return;
+      }
+    }
     var found = _findBoxAtMouse(event);
     if (found) {
       _selectBox(found);
@@ -1930,11 +2083,6 @@ function _boxOnMouseMove(event) {
       var obj = scene.getByName(_boxSelected);
       if (obj) { obj.position.x = pos.x; obj.position.y = pos.y; }
       _updateBoxHighlight();
-      var now = Date.now();
-      if (now - _boxLastPatch > 200) {
-        _boxLastPatch = now;
-        _patchObstacle(_boxSelected, pos.x, pos.y, null);
-      }
     }
     event.preventDefault(); event.stopPropagation();
   }
@@ -1962,6 +2110,8 @@ function _boxOnMouseUp(event) {
       _patchObstacle(_boxSelected, pos.x, pos.y, euler.z);
       _updateBoxRow(_boxSelected, pos.x, pos.y, euler.z);
     }
+    _boxPoseName = _boxSelected;
+    _boxPoseUntil = Date.now() + 1500;
     _boxDragging = false;
     if (!_autoFollow) scene.controls.enabled = true;
   }
@@ -1973,6 +2123,8 @@ function _boxOnMouseUp(event) {
       _patchObstacle(_boxSelected, obj.position.x, obj.position.y, euler.z);
       _updateBoxRow(_boxSelected, obj.position.x, obj.position.y, euler.z);
     }
+    _boxPoseName = _boxSelected;
+    _boxPoseUntil = Date.now() + 1500;
     _boxRotating = false;
     if (!_autoFollow) scene.controls.enabled = true;
   }
@@ -1999,18 +2151,29 @@ function _boxOnContextMenu(event) {
 
 // ── API calls ────────────────────────────────────────────────────────
 
+var _boxChannel = (typeof BroadcastChannel !== 'undefined')
+  ? new BroadcastChannel('physicar-obstacles') : null;
+
 function _spawnBoxAtPosition(x, y) {
   fetch('/gz/api/obstacle', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({x: x, y: y, yaw: 0})
+    body: JSON.stringify({x: x, y: y, yaw: 0, type: 'physicar_box'})
   }).then(function(r) { return r.json(); }).then(function(d) {
     if (d.ok) {
       _boxNames[d.name] = {x: x, y: y, yaw: 0};
       _appendBoxRow(d.name, _boxNames[d.name]);
       setTimeout(function() { _selectBox(d.name); }, 1000);
+      if (_boxChannel) _boxChannel.postMessage({type: 'spawn', name: d.name, x: x, y: y, yaw: 0});
     }
   }).catch(function(e) { console.error('[Box] spawn error:', e); });
+}
+
+function _removeBoxFromScene(name) {
+  var obj = scene.getByName(name);
+  if (obj) {
+    scene.scene.remove(obj);
+  }
 }
 
 function _deleteObstacle(name) {
@@ -2022,6 +2185,8 @@ function _deleteObstacle(name) {
         var row = document.querySelector('.box-row[data-name="' + name + '"]');
         if (row) row.remove();
         if (_boxSelected === name) _deselectBox();
+        _removeBoxFromScene(name);
+        if (_boxChannel) _boxChannel.postMessage({type: 'delete', name: name});
       }
     }).catch(function(e) { console.error('[Box] delete error:', e); });
 }
@@ -2033,13 +2198,59 @@ function _patchObstacle(name, x, y, yaw) {
     method: 'PATCH',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify(body)
+  }).then(function() {
+    if (_boxChannel) _boxChannel.postMessage({type: 'move', name: name, x: x, y: y, yaw: yaw});
   }).catch(function(e) { console.error('[Box] patch error:', e); });
 }
+
+function _respawnAllBoxes() {
+  fetch('/gz/api/obstacles/respawn', {method: 'POST'})
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (d.ok) {
+        _refreshBoxList();
+        if (_boxChannel) _boxChannel.postMessage({type: 'respawn'});
+      }
+    }).catch(function(e) { console.error('[Box] respawn error:', e); });
+}
+
+// ── Cross-tab sync ───────────────────────────────────────────────────
+
+function _handleBoxBroadcast(msg) {
+  var d = msg.data;
+  if (d.type === 'delete') {
+    delete _boxNames[d.name];
+    var row = document.querySelector('.box-row[data-name="' + d.name + '"');
+    if (row) row.remove();
+    if (_boxSelected === d.name) _deselectBox();
+    _removeBoxFromScene(d.name);
+  } else if (d.type === 'spawn') {
+    _boxNames[d.name] = {x: d.x, y: d.y, yaw: d.yaw || 0};
+    var existing = document.querySelector('.box-row[data-name="' + d.name + '"');
+    if (!existing) _appendBoxRow(d.name, _boxNames[d.name]);
+  } else if (d.type === 'move') {
+    if (_boxNames[d.name]) {
+      _boxNames[d.name].x = d.x;
+      _boxNames[d.name].y = d.y;
+      if (d.yaw !== null && d.yaw !== undefined) _boxNames[d.name].yaw = d.yaw;
+      _updateBoxRow(d.name, d.x, d.y, d.yaw);
+    }
+  } else if (d.type === 'respawn') {
+    _refreshBoxList();
+  }
+}
+
+if (_boxChannel) _boxChannel.onmessage = _handleBoxBroadcast;
 
 // ── Init ─────────────────────────────────────────────────────────────
 
 window.addEventListener('load', function() {
   _createBoxUI();
+  // Pre-fetch obstacle names so clicking boxes works immediately
+  fetch('/gz/api/obstacles').then(function(r) { return r.json(); }).then(function(d) {
+    var obs = d.obstacles || {};
+    for (var name in obs) _boxNames[name] = {x: obs[name].x, y: obs[name].y, yaw: obs[name].yaw || 0};
+  }).catch(function() {});
   var el = document.getElementById('container');
   el.addEventListener('mousedown', _boxOnMouseDown, true);
   el.addEventListener('mousemove', _boxOnMouseMove, true);

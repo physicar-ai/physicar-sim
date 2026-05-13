@@ -266,11 +266,67 @@ def _run_gz_cmd(*args, timeout=5):
 
 # ─── Obstacle management ──────────────────────────────────────────────
 _obstacle_lock = threading.Lock()
-_obstacle_counter = 0  # monotonic counter for unique names
-_obstacles = {}  # name -> {x, y, z, yaw}
+_obstacles = {}  # name -> {x, y, z, yaw, type}
+_OBSTACLES_DIR = os.path.join(SHARE_DIR, "obstacles")
 
-OBSTACLE_MODEL = "physicar_box_obstacle"
-OBSTACLE_Z = 0.125  # half of box height (mesh Z range: -0.121 to +0.121)
+OBSTACLE_TYPES = {
+    "physicar_box": {"model": "physicar_box_obstacle", "z": 0.125},
+}
+DEFAULT_OBSTACLE_TYPE = "physicar_box"
+
+def _obstacles_file():
+    """Return path to the obstacle JSON file for the current world."""
+    with _lock:
+        world = _current_world
+    return os.path.join(_OBSTACLES_DIR, f"{world}.json") if world else None
+
+def _save_obstacles():
+    """Persist obstacle config to per-world JSON file (call with _obstacle_lock held)."""
+    path = _obstacles_file()
+    if not path:
+        return
+    try:
+        os.makedirs(_OBSTACLES_DIR, exist_ok=True)
+        data = {"obstacles": dict(_obstacles)}
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(data, f)
+        os.replace(tmp, path)
+    except Exception as e:
+        logging.warning("obstacle save failed: %s", e)
+
+def _load_obstacles():
+    """Load saved obstacle config from per-world JSON file."""
+    global _obstacles
+    path = _obstacles_file()
+    if not path:
+        return
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        _obstacles = data.get("obstacles", {})
+        # Migrate legacy entries without type
+        for v in _obstacles.values():
+            if "type" not in v:
+                v["type"] = DEFAULT_OBSTACLE_TYPE
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        logging.warning("obstacle load failed: %s", e)
+
+def _next_obstacle_name(otype):
+    """Generate next unique name for given obstacle type from existing names."""
+    prefix = otype + "_"
+    max_n = 0
+    for name in _obstacles:
+        if name.startswith(prefix):
+            try:
+                n = int(name[len(prefix):])
+                if n > max_n:
+                    max_n = n
+            except ValueError:
+                pass
+    return f"{prefix}{max_n + 1}"
 
 def _yaw_to_quat(yaw):
     """Convert yaw (radians) to gz.msgs quaternion string."""
@@ -279,24 +335,31 @@ def _yaw_to_quat(yaw):
     cz = math.cos(yaw / 2)
     return f"x: 0, y: 0, z: {sz}, w: {cz}"
 
-def _spawn_obstacle(name, x, y, yaw=0.0):
+def _spawn_obstacle(name, x, y, yaw=0.0, otype=None):
     """Spawn an obstacle in the current world."""
+    if otype is None:
+        otype = DEFAULT_OBSTACLE_TYPE
+    tinfo = OBSTACLE_TYPES.get(otype)
+    if not tinfo:
+        return False, f"unknown obstacle type: {otype}"
     with _lock:
         world = _current_world
     if not world:
         return False, "no world running"
+    oz = tinfo["z"]
     quat = _yaw_to_quat(yaw)
-    pose = f'position: {{x: {x}, y: {y}, z: {OBSTACLE_Z}}}, orientation: {{{quat}}}'
+    pose = f'position: {{x: {x}, y: {y}, z: {oz}}}, orientation: {{{quat}}}'
     try:
         r = _run_gz_cmd("gz", "service", "-s", f"/world/{world}/create",
                         "--reqtype", "gz.msgs.EntityFactory",
                         "--reptype", "gz.msgs.Boolean",
-                        "--timeout", "5000",
-                        "--req", f'sdf_filename: "model://{OBSTACLE_MODEL}", pose: {{{pose}}}, name: "{name}"')
+                        "--timeout", "2000",
+                        "--req", f'sdf_filename: "model://{tinfo["model"]}", pose: {{{pose}}}, name: "{name}"')
         if r.returncode != 0:
             return False, r.stderr.strip() or "gz create failed"
         with _obstacle_lock:
-            _obstacles[name] = {"x": x, "y": y, "z": OBSTACLE_Z, "yaw": yaw}
+            _obstacles[name] = {"x": x, "y": y, "z": oz, "yaw": yaw, "type": otype}
+            _save_obstacles()
         return True, None
     except Exception as e:
         return False, str(e)
@@ -311,30 +374,67 @@ def _remove_obstacle(name):
         r = _run_gz_cmd("gz", "service", "-s", f"/world/{world}/remove",
                         "--reqtype", "gz.msgs.Entity",
                         "--reptype", "gz.msgs.Boolean",
-                        "--timeout", "5000",
+                        "--timeout", "2000",
                         "--req", f'name: "{name}", type: MODEL')
         if r.returncode != 0:
             return False, r.stderr.strip() or "gz remove failed"
         with _obstacle_lock:
             _obstacles.pop(name, None)
+            _save_obstacles()
         return True, None
     except Exception as e:
         return False, str(e)
 
 def _move_obstacle(name, x, y, yaw=None):
-    """Move/rotate an obstacle by removing and re-spawning it."""
+    """Move/rotate an obstacle using gz set_pose (no remove+respawn)."""
     with _obstacle_lock:
         info = _obstacles.get(name)
     if not info:
         return False, "obstacle not found"
     if yaw is None:
         yaw = info["yaw"]
-    ok, err = _remove_obstacle(name)
-    if not ok:
-        return False, err
-    import time as _t
-    _t.sleep(0.3)
-    return _spawn_obstacle(name, x, y, yaw)
+    otype = info.get("type", DEFAULT_OBSTACLE_TYPE)
+    oz = OBSTACLE_TYPES.get(otype, {}).get("z", 0.125)
+    with _lock:
+        world = _current_world
+    if not world:
+        return False, "no world running"
+    quat = _yaw_to_quat(yaw)
+    try:
+        r = _run_gz_cmd("gz", "service", "-s", f"/world/{world}/set_pose",
+                        "--reqtype", "gz.msgs.Pose",
+                        "--reptype", "gz.msgs.Boolean",
+                        "--timeout", "2000",
+                        "--req", f'name: "{name}", position: {{x: {x}, y: {y}, z: {oz}}}, orientation: {{{quat}}}')
+        if r.returncode != 0:
+            return False, r.stderr.strip() or "gz set_pose failed"
+        with _obstacle_lock:
+            _obstacles[name] = {"x": x, "y": y, "z": oz, "yaw": yaw, "type": otype}
+            _save_obstacles()
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+def _restore_obstacles_in_sim(wname):
+    """Re-spawn all saved obstacles in the running world."""
+    with _obstacle_lock:
+        items = list(_obstacles.items())
+    if not items:
+        return
+    logging.info("restoring %d saved obstacles", len(items))
+    for name, info in items:
+        _spawn_obstacle(name, info["x"], info["y"], info.get("yaw", 0), info.get("type", DEFAULT_OBSTACLE_TYPE))
+
+def _respawn_all_obstacles():
+    """Re-set all obstacles to their saved positions (for when car bumps them)."""
+    with _obstacle_lock:
+        items = list(_obstacles.items())
+    results = []
+    for name, info in items:
+        ok, err = _move_obstacle(name, info["x"], info["y"], info.get("yaw", 0))
+        if not ok:
+            results.append(f"{name}: {err}")
+    return results
 
 # ─── Track bounds ──────────────────────────────────────────────────────
 _track_bounds_cache = {}
@@ -393,7 +493,7 @@ def start_sim(world_file):
         _kill_all_gz()
         with _lock:
             _current_world = None
-        # Clear obstacles when world changes
+        # Clear in-memory obstacles when world changes
         with _obstacle_lock:
             _obstacles.clear()
 
@@ -418,6 +518,10 @@ def start_sim(world_file):
         with _lock:
             _sim_proc = proc
             _current_world = os.path.splitext(world_file)[0]
+
+        # Restore saved obstacle config for this world
+        with _obstacle_lock:
+            _load_obstacles()
 
         # Post-start: wait for sim ready → unpause → spawn → start websocket
         if wname:
@@ -457,6 +561,8 @@ def start_sim(world_file):
                         return
                     logging.info("physicar spawned, starting gz-launch")
                     _start_launch()
+                    # Restore saved obstacles
+                    _restore_obstacles_in_sim(wname)
                 finally:
                     with _lock:
                         _switching = False
@@ -605,17 +711,25 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._json(404, {"error": "not found"})
 
     def do_POST(self):
-        if self.path == "/obstacle":
+        if self.path == "/obstacles/respawn":
+            errors = _respawn_all_obstacles()
+            if errors:
+                self._json(200, {"ok": True, "warnings": errors})
+            else:
+                self._json(200, {"ok": True})
+        elif self.path == "/obstacle":
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length)) if length else {}
             x = float(body.get("x", 0))
             y = float(body.get("y", 0))
             yaw = float(body.get("yaw", 0))
-            global _obstacle_counter
+            otype = body.get("type", DEFAULT_OBSTACLE_TYPE)
+            if otype not in OBSTACLE_TYPES:
+                self._json(400, {"error": f"unknown type: {otype}"})
+                return
             with _obstacle_lock:
-                _obstacle_counter += 1
-                name = f"box_{_obstacle_counter}"
-            ok, err = _spawn_obstacle(name, x, y, yaw)
+                name = _next_obstacle_name(otype)
+            ok, err = _spawn_obstacle(name, x, y, yaw, otype)
             if ok:
                 self._json(200, {"ok": True, "name": name})
             else:
