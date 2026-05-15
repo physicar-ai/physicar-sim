@@ -264,6 +264,70 @@ def _run_gz_cmd(*args, timeout=5):
         list(args), env=env, timeout=timeout, capture_output=True, text=True
     )
 
+def _get_vehicle_pose(world):
+    """Query current vehicle pose in world coordinates from Gazebo."""
+    import math
+    try:
+        r = _run_gz_cmd("gz", "topic", "-e", "-t",
+                        f"/world/{world}/dynamic_pose/info", "-n", "1", timeout=3)
+        if r.returncode != 0 or not r.stdout:
+            return None
+    except Exception:
+        return None
+    for block in re.split(r'(?=^pose \{)', r.stdout, flags=re.MULTILINE):
+        if not re.search(r'name:\s*"physicar"', block):
+            continue
+        px = re.search(r'position\s*\{[^}]*x:\s*([\d.eE+-]+)', block)
+        py = re.search(r'position\s*\{[^}]*y:\s*([\d.eE+-]+)', block)
+        pz = re.search(r'position\s*\{[^}]*z:\s*([\d.eE+-]+)', block)
+        ow = re.search(r'orientation\s*\{[^}]*w:\s*([\d.eE+-]+)', block)
+        if not (px and py and pz and ow):
+            continue
+        x, y, z = float(px.group(1)), float(py.group(1)), float(pz.group(1))
+        qx = float((re.search(r'orientation\s*\{[^}]*x:\s*([\d.eE+-]+)', block) or type('',(),{'group':lambda s,i:'0'})()).group(1))
+        qy = float((re.search(r'orientation\s*\{[^}]*y:\s*([\d.eE+-]+)', block) or type('',(),{'group':lambda s,i:'0'})()).group(1))
+        qz = float((re.search(r'orientation\s*\{[^}]*z:\s*([\d.eE+-]+)', block) or type('',(),{'group':lambda s,i:'0'})()).group(1))
+        qw = float(ow.group(1))
+        yaw = math.atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz))
+        return {"x": round(x, 6), "y": round(y, 6), "z": round(z, 6), "yaw": round(yaw, 6)}
+    return None
+
+def _get_route(world):
+    """Load route waypoints from npy file."""
+    try:
+        import numpy as np
+        npy = os.path.join(SHARE_DIR, "routes", world + ".npy")
+        if not os.path.isfile(npy):
+            return None
+        d = np.load(npy)
+        return [[round(float(r[0]), 6), round(float(r[1]), 6)] for r in d]
+    except Exception:
+        return None
+
+def _reset_vehicle(world):
+    """Reset vehicle to spawn position using set_pose."""
+    import math
+    try:
+        import numpy as np
+        npy = os.path.join(SHARE_DIR, "routes", world + ".npy")
+        d = np.load(npy)
+        x, y = float(d[0, 0]), float(d[0, 1])
+        yaw = math.atan2(d[1, 1] - y, d[1, 0] - x)
+    except Exception:
+        x, y, yaw = 0.0, 0.0, 0.0
+    quat = _yaw_to_quat(yaw)
+    try:
+        r = _run_gz_cmd("gz", "service", "-s", f"/world/{world}/set_pose",
+                        "--reqtype", "gz.msgs.Pose",
+                        "--reptype", "gz.msgs.Boolean",
+                        "--timeout", "2000",
+                        "--req", f'name: "physicar", position: {{x: {x}, y: {y}, z: 0.05}}, orientation: {{{quat}}}')
+        if r.returncode != 0:
+            return False, r.stderr.strip() or "set_pose failed"
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
 # ─── Obstacle management ──────────────────────────────────────────────
 _obstacle_lock = threading.Lock()
 _obstacles = {}  # name -> {x, y, z, yaw, type}
@@ -707,11 +771,45 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._json(200, bounds)
             else:
                 self._json(404, {"error": "bounds not available"})
+        elif self.path == "/pose":
+            with _lock:
+                world = _current_world
+            if not world:
+                self._json(404, {"error": "no world running"})
+                return
+            pose = _get_vehicle_pose(world)
+            if pose:
+                self._json(200, pose)
+            else:
+                self._json(503, {"error": "pose not available"})
+        elif self.path == "/route":
+            with _lock:
+                world = _current_world
+            if not world:
+                self._json(404, {"error": "no world running"})
+                return
+            waypoints = _get_route(world)
+            if waypoints is not None:
+                self._json(200, {"world": world, "waypoints": waypoints})
+            else:
+                self._json(404, {"error": "route not available"})
         else:
             self._json(404, {"error": "not found"})
 
     def do_POST(self):
-        if self.path == "/obstacles/respawn":
+        global _sim_proc, _current_world, _launch_proc
+        if self.path == "/reset":
+            with _lock:
+                world = _current_world
+            if not world:
+                self._json(404, {"error": "no world running"})
+                return
+            ok, err = _reset_vehicle(world)
+            if ok:
+                self._json(200, {"ok": True})
+            else:
+                self._json(500, {"error": err})
+        elif self.path == "/obstacles/respawn":
             errors = _respawn_all_obstacles()
             if errors:
                 self._json(200, {"ok": True, "warnings": errors})
@@ -906,7 +1004,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif self.path == "/stop":
             _kill_all_gz()
             with _lock:
-                global _sim_proc, _current_world, _launch_proc
                 _sim_proc = None
                 _launch_proc = None
                 _current_world = None
