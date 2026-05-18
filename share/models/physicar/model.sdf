@@ -294,8 +294,8 @@
       <axis>
         <xyz>0 0 1</xyz>
         <limit>
-          <lower>-0.59999999999999998</lower>
-          <upper>0.59999999999999998</upper>
+          <lower>-0.453786</lower>
+          <upper>0.453786</upper>
           <effort>25</effort>
           <velocity>100</velocity>
         </limit>
@@ -395,8 +395,8 @@
       <axis>
         <xyz>0 0 1</xyz>
         <limit>
-          <lower>-0.59999999999999998</lower>
-          <upper>0.59999999999999998</upper>
+          <lower>-0.453786</lower>
+          <upper>0.453786</upper>
           <effort>25</effort>
           <velocity>100</velocity>
         </limit>
@@ -628,7 +628,7 @@
       <left_steering_joint>front_left_steering_joint</left_steering_joint>
       <right_steering_joint>front_right_steering_joint</right_steering_joint>
       <kingpin_width>0.16</kingpin_width>
-      <steering_limit>0.436332</steering_limit>
+      <steering_limit>0.453786</steering_limit>
       <wheel_base>0.18</wheel_base>
       <wheel_separation>0.16</wheel_separation>
       <wheel_radius>0.0375</wheel_radius>
