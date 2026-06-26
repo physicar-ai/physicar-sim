@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Gazebo Web</title>
+  <link rel="stylesheet" href="assets/css/gzweb.css">
+  <script src="https://cdn.jsdelivr.net/npm/protobufjs@6.11.4/dist/protobuf.min.js"></script>
+  <script src="assets/lib/eventemitter2.min.js"></script>
+  <script src="assets/lib/gz.js"></script>
+  <script src="assets/lib/gz3d.js"></script>
+  <script src="assets/js/gzweb.js"></script>
+</head>
+<body onload="init()">
+  <button id="respawn-btn" onclick="doRespawn()" title="Respawn" disabled>
+    <span class="respawn-icon">&#x21bb;</span><span class="bar-label"> Respawn</span>
+  </button>
+  <div id="world-selector">
+    <div class="dropdown">
+      <div id="dropdown-toggle" class="dropdown-toggle disabled" onclick="toggleDropdown()">Loading...</div>
+      <div id="dropdown-menu" class="dropdown-menu"></div>
+    </div>
+    <button id="import-btn" onclick="openUpload()" title="Import World"><span class="import-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></span><span class="bar-label"> Import</span></button>
+  </div>
+  <div id="settings">
+    <button id="settings-btn" onclick="toggleSettings()" title="Settings"><span class="bar-label">Settings </span><span class="settings-icon">&#x2699;</span></button>
+    <div id="settings-menu">
+      <label><input type="checkbox" id="chk-autofollow" onchange="toggleAutoFollow(this.checked); saveSettings()"> Auto Follow</label>
+      <label><input type="checkbox" id="chk-grid" onchange="toggleGrid(this.checked); saveSettings()"> Grid</label>
+      <label><input type="checkbox" id="chk-axes" onchange="toggleAxes(this.checked); saveSettings()"> TF</label>
+      <label><input type="checkbox" id="chk-lidar" onchange="toggleLidar(this.checked); saveSettings()"> LiDAR</label>
+      <label><input type="checkbox" id="chk-pose" onchange="togglePose(this.checked); saveSettings()"> Pose Info</label>
+    </div>
+  </div>
+  <div id="pose-panel"></div>
+  <div id="container"></div>
+  <div id="upload-overlay" onclick="closeUpload()"></div>
+  <div id="upload-area">
+    <span class="close" onclick="closeUpload()">&times;</span>
+    <p style="font-size: 16px; margin-bottom: 8px;">Import Custom Track</p>
+    <p style="color: #aaa; font-size: 12px; margin-bottom: 16px;">To create your own world, use the World Builder at <a href="https://physicar.ai/resources/world-builder" target="_blank" style="color: #6cb2ff;">https://physicar.ai/resources/world-builder</a></p>
+    <div id="drop-zone" style="padding: 20px; border: 1px dashed #666; border-radius: 8px; margin-bottom: 12px; cursor: pointer;"
+         onclick="document.getElementById('file-input').click()">
+      <p>Drop .tar.gz here or click to browse</p>
+    </div>
+    <input type="file" id="file-input" accept=".tar.gz,.gz" onchange="handleFile(this.files[0])" style="display:none">
+    <div id="upload-status"></div>
+  </div>
+</body>
+</html>

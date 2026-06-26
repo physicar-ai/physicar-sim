@@ -1,0 +1,192 @@
+<?xml version="1.0" encoding="utf-8"?>
+<COLLADA xmlns="http://www.collada.org/2005/11/COLLADASchema" version="1.4.1">
+  <asset>
+    <created>2026-04-30T10:19:01.317Z</created>
+    <modified>2026-04-30T10:19:01.317Z</modified>
+    <unit name="meter" meter="1"/>
+    <up_axis>Z_UP</up_axis>
+  </asset>
+  <library_effects>
+    <effect id="Top_Material-effect"><profile_COMMON>
+        <newparam sid="Top_Material_png-surface"><surface type="2D"><init_from>Top_Material_png</init_from></surface></newparam>
+        <newparam sid="Top_Material_png-sampler"><sampler2D><source>Top_Material_png-surface</source></sampler2D></newparam>
+        <technique sid="common"><phong>
+          <emission><color sid="emission">0 0 0 1</color></emission>
+          <ambient><color sid="ambient">1 1 1 1</color></ambient>
+          <diffuse><texture texture="Top_Material_png-sampler" texcoord="UVMap"/></diffuse>
+          <specular><color sid="specular">0 0 0 1</color></specular>
+          <shininess><float sid="shininess">0</float></shininess>
+        </phong></technique>
+      </profile_COMMON></effect>
+    <effect id="Bottom_Material-effect"><profile_COMMON>
+        <newparam sid="Bottom_Material_png-surface"><surface type="2D"><init_from>Bottom_Material_png</init_from></surface></newparam>
+        <newparam sid="Bottom_Material_png-sampler"><sampler2D><source>Bottom_Material_png-surface</source></sampler2D></newparam>
+        <technique sid="common"><phong>
+          <emission><color sid="emission">0 0 0 1</color></emission>
+          <ambient><color sid="ambient">1 1 1 1</color></ambient>
+          <diffuse><texture texture="Bottom_Material_png-sampler" texcoord="UVMap"/></diffuse>
+          <specular><color sid="specular">0 0 0 1</color></specular>
+          <shininess><float sid="shininess">0</float></shininess>
+        </phong></technique>
+      </profile_COMMON></effect>
+    <effect id="Front_Material-effect"><profile_COMMON>
+        <newparam sid="Front_Material_png-surface"><surface type="2D"><init_from>Front_Material_png</init_from></surface></newparam>
+        <newparam sid="Front_Material_png-sampler"><sampler2D><source>Front_Material_png-surface</source></sampler2D></newparam>
+        <technique sid="common"><phong>
+          <emission><color sid="emission">0 0 0 1</color></emission>
+          <ambient><color sid="ambient">1 1 1 1</color></ambient>
+          <diffuse><texture texture="Front_Material_png-sampler" texcoord="UVMap"/></diffuse>
+          <specular><color sid="specular">0 0 0 1</color></specular>
+          <shininess><float sid="shininess">0</float></shininess>
+        </phong></technique>
+      </profile_COMMON></effect>
+    <effect id="Back_Material-effect"><profile_COMMON>
+        <newparam sid="Back_Material_png-surface"><surface type="2D"><init_from>Back_Material_png</init_from></surface></newparam>
+        <newparam sid="Back_Material_png-sampler"><sampler2D><source>Back_Material_png-surface</source></sampler2D></newparam>
+        <technique sid="common"><phong>
+          <emission><color sid="emission">0 0 0 1</color></emission>
+          <ambient><color sid="ambient">1 1 1 1</color></ambient>
+          <diffuse><texture texture="Back_Material_png-sampler" texcoord="UVMap"/></diffuse>
+          <specular><color sid="specular">0 0 0 1</color></specular>
+          <shininess><float sid="shininess">0</float></shininess>
+        </phong></technique>
+      </profile_COMMON></effect>
+    <effect id="Left_Material-effect"><profile_COMMON>
+        <newparam sid="Left_Material_png-surface"><surface type="2D"><init_from>Left_Material_png</init_from></surface></newparam>
+        <newparam sid="Left_Material_png-sampler"><sampler2D><source>Left_Material_png-surface</source></sampler2D></newparam>
+        <technique sid="common"><phong>
+          <emission><color sid="emission">0 0 0 1</color></emission>
+          <ambient><color sid="ambient">1 1 1 1</color></ambient>
+          <diffuse><texture texture="Left_Material_png-sampler" texcoord="UVMap"/></diffuse>
+          <specular><color sid="specular">0 0 0 1</color></specular>
+          <shininess><float sid="shininess">0</float></shininess>
+        </phong></technique>
+      </profile_COMMON></effect>
+    <effect id="Right_Material-effect"><profile_COMMON>
+        <newparam sid="Right_Material_png-surface"><surface type="2D"><init_from>Right_Material_png</init_from></surface></newparam>
+        <newparam sid="Right_Material_png-sampler"><sampler2D><source>Right_Material_png-surface</source></sampler2D></newparam>
+        <technique sid="common"><phong>
+          <emission><color sid="emission">0 0 0 1</color></emission>
+          <ambient><color sid="ambient">1 1 1 1</color></ambient>
+          <diffuse><texture texture="Right_Material_png-sampler" texcoord="UVMap"/></diffuse>
+          <specular><color sid="specular">0 0 0 1</color></specular>
+          <shininess><float sid="shininess">0</float></shininess>
+        </phong></technique>
+      </profile_COMMON></effect>
+  </library_effects>
+  <library_images>
+    <image id="Top_Material_png" name="Top_Material_png"><init_from>textures/Top_Material.png</init_from></image>
+    <image id="Bottom_Material_png" name="Bottom_Material_png"><init_from>textures/Bottom_Material.png</init_from></image>
+    <image id="Front_Material_png" name="Front_Material_png"><init_from>textures/Front_Material.png</init_from></image>
+    <image id="Back_Material_png" name="Back_Material_png"><init_from>textures/Back_Material.png</init_from></image>
+    <image id="Left_Material_png" name="Left_Material_png"><init_from>textures/Left_Material.png</init_from></image>
+    <image id="Right_Material_png" name="Right_Material_png"><init_from>textures/Right_Material.png</init_from></image>
+  </library_images>
+  <library_materials>
+    <material id="Top_Material-material" name="Top_Material"><instance_effect url="#Top_Material-effect"/></material>
+    <material id="Bottom_Material-material" name="Bottom_Material"><instance_effect url="#Bottom_Material-effect"/></material>
+    <material id="Front_Material-material" name="Front_Material"><instance_effect url="#Front_Material-effect"/></material>
+    <material id="Back_Material-material" name="Back_Material"><instance_effect url="#Back_Material-effect"/></material>
+    <material id="Left_Material-material" name="Left_Material"><instance_effect url="#Left_Material-effect"/></material>
+    <material id="Right_Material-material" name="Right_Material"><instance_effect url="#Right_Material-effect"/></material>
+  </library_materials>
+  <library_geometries>
+    <geometry id="physicar_box-mesh-mesh" name="physicar_box-mesh">
+      <mesh>
+        <source id="physicar_box-mesh-positions">
+          <float_array id="physicar_box-mesh-positions-array" count="72">-0.181 -0.121 0.121 0.181 -0.121 0.121 0.181 0.121 0.121 -0.181 0.121 0.121 -0.181 0.121 -0.121 0.181 0.121 -0.121 0.181 -0.121 -0.121 -0.181 -0.121 -0.121 -0.181 -0.121 -0.121 0.181 -0.121 -0.121 0.181 -0.121 0.121 -0.181 -0.121 0.121 0.181 0.121 -0.121 -0.181 0.121 -0.121 -0.181 0.121 0.121 0.181 0.121 0.121 -0.181 0.121 -0.121 -0.181 -0.121 -0.121 -0.181 -0.121 0.121 -0.181 0.121 0.121 0.181 -0.121 -0.121 0.181 0.121 -0.121 0.181 0.121 0.121 0.181 -0.121 0.121</float_array>
+          <technique_common>
+            <accessor source="#physicar_box-mesh-positions-array" count="24" stride="3">
+              <param name="X" type="float"/><param name="Y" type="float"/><param name="Z" type="float"/>
+            </accessor>
+          </technique_common>
+        </source>
+        <source id="physicar_box-mesh-normals">
+          <float_array id="physicar_box-mesh-normals-array" count="72">0 0 1 0 0 1 0 0 1 0 0 1 0 0 -1 0 0 -1 0 0 -1 0 0 -1 0 -1 0 0 -1 0 0 -1 0 0 -1 0 0 1 0 0 1 0 0 1 0 0 1 0 -1 0 0 -1 0 0 -1 0 0 -1 0 0 1 0 0 1 0 0 1 0 0 1 0 0</float_array>
+          <technique_common>
+            <accessor source="#physicar_box-mesh-normals-array" count="24" stride="3">
+              <param name="X" type="float"/><param name="Y" type="float"/><param name="Z" type="float"/>
+            </accessor>
+          </technique_common>
+        </source>
+        <source id="physicar_box-mesh-map">
+          <float_array id="physicar_box-mesh-map-array" count="48">0 0 1 0 1 1 0 1 0 0 1 0 1 1 0 1 0 0 1 0 1 1 0 1 0 0 1 0 1 1 0 1 0 0 1 0 1 1 0 1 0 0 1 0 1 1 0 1</float_array>
+          <technique_common>
+            <accessor source="#physicar_box-mesh-map-array" count="24" stride="2">
+              <param name="S" type="float"/><param name="T" type="float"/>
+            </accessor>
+          </technique_common>
+        </source>
+        <vertices id="physicar_box-mesh-vertices">
+          <input semantic="POSITION" source="#physicar_box-mesh-positions"/>
+        </vertices>
+        <triangles material="Top_Material-material" count="2">
+          <input semantic="VERTEX" source="#physicar_box-mesh-vertices" offset="0"/>
+          <input semantic="NORMAL" source="#physicar_box-mesh-normals" offset="1"/>
+          <input semantic="TEXCOORD" source="#physicar_box-mesh-map" offset="2" set="0"/>
+          <p>0 0 0 1 1 1 2 2 2 0 0 0 2 2 2 3 3 3</p>
+        </triangles>
+        <triangles material="Bottom_Material-material" count="2">
+          <input semantic="VERTEX" source="#physicar_box-mesh-vertices" offset="0"/>
+          <input semantic="NORMAL" source="#physicar_box-mesh-normals" offset="1"/>
+          <input semantic="TEXCOORD" source="#physicar_box-mesh-map" offset="2" set="0"/>
+          <p>4 4 4 5 5 5 6 6 6 4 4 4 6 6 6 7 7 7</p>
+        </triangles>
+        <triangles material="Front_Material-material" count="2">
+          <input semantic="VERTEX" source="#physicar_box-mesh-vertices" offset="0"/>
+          <input semantic="NORMAL" source="#physicar_box-mesh-normals" offset="1"/>
+          <input semantic="TEXCOORD" source="#physicar_box-mesh-map" offset="2" set="0"/>
+          <p>8 8 8 9 9 9 10 10 10 8 8 8 10 10 10 11 11 11</p>
+        </triangles>
+        <triangles material="Back_Material-material" count="2">
+          <input semantic="VERTEX" source="#physicar_box-mesh-vertices" offset="0"/>
+          <input semantic="NORMAL" source="#physicar_box-mesh-normals" offset="1"/>
+          <input semantic="TEXCOORD" source="#physicar_box-mesh-map" offset="2" set="0"/>
+          <p>12 12 12 13 13 13 14 14 14 12 12 12 14 14 14 15 15 15</p>
+        </triangles>
+        <triangles material="Left_Material-material" count="2">
+          <input semantic="VERTEX" source="#physicar_box-mesh-vertices" offset="0"/>
+          <input semantic="NORMAL" source="#physicar_box-mesh-normals" offset="1"/>
+          <input semantic="TEXCOORD" source="#physicar_box-mesh-map" offset="2" set="0"/>
+          <p>16 16 16 17 17 17 18 18 18 16 16 16 18 18 18 19 19 19</p>
+        </triangles>
+        <triangles material="Right_Material-material" count="2">
+          <input semantic="VERTEX" source="#physicar_box-mesh-vertices" offset="0"/>
+          <input semantic="NORMAL" source="#physicar_box-mesh-normals" offset="1"/>
+          <input semantic="TEXCOORD" source="#physicar_box-mesh-map" offset="2" set="0"/>
+          <p>20 20 20 21 21 21 22 22 22 20 20 20 22 22 22 23 23 23</p>
+        </triangles>
+      </mesh>
+    </geometry>
+  </library_geometries>
+  <library_visual_scenes>
+    <visual_scene id="Scene" name="Scene">
+      <node id="physicar_box" name="physicar_box" type="NODE">
+        <matrix sid="transform">1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1</matrix>
+        <instance_geometry url="#physicar_box-mesh-mesh" name="physicar_box">
+          <bind_material><technique_common>
+            <instance_material symbol="Top_Material-material" target="#Top_Material-material">
+              <bind_vertex_input semantic="UVMap" input_semantic="TEXCOORD" input_set="0"/>
+            </instance_material>
+            <instance_material symbol="Bottom_Material-material" target="#Bottom_Material-material">
+              <bind_vertex_input semantic="UVMap" input_semantic="TEXCOORD" input_set="0"/>
+            </instance_material>
+            <instance_material symbol="Front_Material-material" target="#Front_Material-material">
+              <bind_vertex_input semantic="UVMap" input_semantic="TEXCOORD" input_set="0"/>
+            </instance_material>
+            <instance_material symbol="Back_Material-material" target="#Back_Material-material">
+              <bind_vertex_input semantic="UVMap" input_semantic="TEXCOORD" input_set="0"/>
+            </instance_material>
+            <instance_material symbol="Left_Material-material" target="#Left_Material-material">
+              <bind_vertex_input semantic="UVMap" input_semantic="TEXCOORD" input_set="0"/>
+            </instance_material>
+            <instance_material symbol="Right_Material-material" target="#Right_Material-material">
+              <bind_vertex_input semantic="UVMap" input_semantic="TEXCOORD" input_set="0"/>
+            </instance_material>
+          </technique_common></bind_material>
+        </instance_geometry>
+      </node>
+    </visual_scene>
+  </library_visual_scenes>
+  <scene><instance_visual_scene url="#Scene"/></scene>
+</COLLADA>

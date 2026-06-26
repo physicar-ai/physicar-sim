@@ -1,0 +1,88 @@
+<?xml version='1.0' encoding='utf-8'?>
+<sdf version="1.4">
+<world name="physicar_base">
+  <scene>
+    <ambient>0.5 0.5 0.5 1.0</ambient>
+    <background>0.66 0.81 0.96 1.0</background>
+    <shadows>0</shadows>
+    <sky />
+  </scene>
+  <include>
+    <uri>model://sun</uri>
+    <pose>0.0 0.0 15.0 0 0 0</pose>
+    <cast_shadows>false</cast_shadows>
+    <attenuation>
+      <constant>0.5</constant>
+      <linear>0.01</linear>
+      <quadratic>0.0</quadratic>
+      <range>100</range>
+    </attenuation>
+  </include>
+  <light name="Light 1" type="point">
+         <pose>0 0 15 0 0 0</pose>
+         <diffuse>0.225 0.225 0.225 1</diffuse>
+         <specular>.1 .1 .1 1</specular>
+         <attenuation>
+                <constant>0.4</constant>
+                <linear>0.01</linear>
+                <quadratic>0.00</quadratic>
+                <range>50</range>
+         </attenuation>
+         <direction>0 0 -1</direction>
+         <cast_shadows>false</cast_shadows>
+  </light>
+  <include>
+    <uri>model://models/physicar_base</uri>
+    <pose>0 0 0 0 0 0</pose>
+    <name>racetrack</name>
+  </include>
+  <model name="box_1">
+    <pose>2.9660 2.7780 0.1210 0 0 0.0000</pose>
+    <link name="link">
+      <inertial>
+        <mass>0.5</mass>
+        <inertia>
+          <ixx>0.004880</ixx><ixy>0</ixy><ixz>0</ixz>
+          <iyy>0.007900</iyy><iyz>0</iyz>
+          <izz>0.007900</izz>
+        </inertia>
+      </inertial>
+      <collision name="collision">
+        <geometry><box><size>0.36199999999999993 0.242 0.242</size></box></geometry>
+      </collision>
+      <visual name="visual">
+        <geometry>
+          <mesh><uri>model://meshes/physicar_base/box_1.dae</uri></mesh>
+        </geometry>
+      </visual>
+    </link>
+    <static>false</static>
+  </model>
+  <model name="box_0">
+    <pose>2.0577 2.7779 0.1210 0 0 0.0000</pose>
+    <link name="link">
+      <inertial>
+        <mass>0.5</mass>
+        <inertia>
+          <ixx>0.004880</ixx><ixy>0</ixy><ixz>0</ixz>
+          <iyy>0.007900</iyy><iyz>0</iyz>
+          <izz>0.007900</izz>
+        </inertia>
+      </inertial>
+      <collision name="collision">
+        <geometry><box><size>0.36199999999999993 0.242 0.242</size></box></geometry>
+      </collision>
+      <visual name="visual">
+        <geometry>
+          <mesh><uri>model://meshes/physicar_base/box_0.dae</uri></mesh>
+        </geometry>
+      </visual>
+    </link>
+    <static>false</static>
+  </model>
+  <physics name="default_physics" type="ode">
+    <max_step_size>0.005</max_step_size>
+    <real_time_update_rate>200</real_time_update_rate>
+  </physics>
+</world>
+</sdf>
