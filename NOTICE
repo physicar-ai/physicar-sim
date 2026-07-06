@@ -1,0 +1,24 @@
+PhysiCar Simulation (physicar-sim)
+Copyright 2026 AICASTLE Inc. (주식회사 에이아이캐슬)
+
+This product includes software developed by AICASTLE Inc. and contributors.
+Licensed under the GNU General Public License v3.0 or later (see LICENSE).
+
+This product also bundles the following third-party software, each
+distributed under its own license:
+
+  * gzweb client assets — share/assets/lib/{gz.js,gz3d.js,gzweb.min.js,
+                          eventemitter2.min.js}
+      Copyright (C) 2014-2024 Open Source Robotics Foundation
+      Apache License 2.0 (see https://github.com/gazebosim/gzweb)
+
+      gz3d.js bundles additional third-party JavaScript libraries (Three.js,
+      Lodash, ColladaLoader, etc.) under MIT, BSD-3-Clause, and CC LGPL —
+      see the inline headers within the file for full attribution.
+
+  * Gazebo example/standard meshes and worlds (share/models, share/worlds,
+    share/meshes) — derived from or compatible with assets distributed
+    with Gazebo (https://app.gazebosim.org/) under Creative Commons or
+    Apache 2.0 licensing as noted in each model's own metadata.
+
+"PhysiCar" is a trademark of AICASTLE Inc.
