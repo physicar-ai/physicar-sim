@@ -1,7 +1,6 @@
-/* Proportional UI unit: the whole HUD scales with the viewport (whichever
- * dimension is limiting) and caps at the original design size (13px base),
- * so the UI shrinks cleanly inside small iframes instead of overflowing. */
-:root { --u: min(1.3vw, 3.4vh, 13px); }
+/* HUD unit: fixed — proportional (vw/vh) scaling made text unreadably
+   small at small viewports. Layout stays fluid; type/chrome do not shrink. */
+:root { --u: 13px; }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body { background: #1a1a2e; color: #eee; font-family: sans-serif; overflow: hidden; }
