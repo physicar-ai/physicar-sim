@@ -366,6 +366,12 @@ def _get_builtin_obstacles(world):
                 ox, oy, oz, oyaw = float(parts[0]), float(parts[1]), float(parts[2]), float(parts[5])
         static_el = m.find("static")
         is_static = bool(static_el is not None and static_el.text and static_el.text.strip().lower() == "true")
+        # 종류 마커 = link 이름 (Custom World Builder 계약: object/wall/light, 'signal'은 구 마커)
+        marker = None
+        for lk in m.findall("link"):
+            if lk.get("name") in ("object", "wall", "light", "signal"):
+                marker = "light" if lk.get("name") == "signal" else lk.get("name")
+                break
         size = None
         sz = m.find("./link/collision/geometry/box/size")
         if sz is not None and sz.text:
@@ -375,7 +381,9 @@ def _get_builtin_obstacles(world):
         origin = {"x": round(ox, 6), "y": round(oy, 6), "z": round(oz, 6), "yaw": round(oyaw, 6)}
         items.append({
             "name": name,
+            "type": marker or "model",
             "static": is_static,
+            "movable": marker != "wall",
             "origin": origin,
             "current": live.get(name, origin),
             "size": size,
@@ -393,15 +401,13 @@ LIGHT_STATES = ("red", "yellow", "green")
 LIGHT_TARGETS = ("red", "green")  # 명령 가능한 목적 상태 — 노랑은 자동 경유 전용
 YELLOW_S = 3.0                    # green→red 전환 시 노랑 지속 시간
 _yellow_timers = {}               # name -> threading.Timer
-_lights = {}            # name -> {"x", "y", "yaw", "state", "builtin"}
+_lights = {}            # name -> {"x", "y", "yaw", "state", "panel"} — 월드 정의 신호등만
 _lights_world = None    # world the registry belongs to
-_light_counter = 0
 
 # 스크린 패널 위치 계약 — 전부 파라메트릭 (정적 모델 없음):
-# ① 월드 정의 신호등(Custom World Builder) = 자기기술 — 모델의 `screen` visual
-#    (pose/size)을 읽어 화면 크기·기울기에 맞는 패널을 생성·스폰한다.
-# ② 런타임 배치 신호등(+ Light 버튼) = 같은 수식으로 스탠드 SDF를 생성해 스폰
-#    (기본 기기 0.18×0.32m 16:9, 15° 기울기 — 에디터 기본값과 동일).
+# 월드 정의 신호등(Custom World Builder) = 자기기술 — 모델의 `screen` visual
+# (pose/size)을 읽어 화면 크기·기울기에 맞는 패널을 생성·스폰한다.
+# (런타임 신호등 배치는 2026-07 제거 — 월드에 정의된 신호등만 인식·제어한다.)
 _SCREEN_HIDDEN_Z = -1.0     # OFF: 지하
 _LIGHT_W = 0.18             # 기본 기기 가로 (에디터 LIGHT_DEFAULT와 동일)
 _LIGHT_ASPECT = 16.0 / 9.0
@@ -436,46 +442,6 @@ def _light_geom(W=_LIGHT_W, tilt_deg=_LIGHT_TILT_DEG):
         "panel": {"px": round(scx + fx * panel_off, 6), "pz": round(scz + fz * panel_off, 6),
                   "pitch": round(-tilt, 6), "w": round(s_w, 5), "h": round(s_h, 5)},
     }
-
-def _light_stand_sdf(g):
-    """런타임 신호등 스탠드 SDF — wb-export _wbGenerateLightModel과 동일 외형
-    (몸체/화면/램프: 빨강 꺼짐 + 초록 켜짐 발광, 콜리전 = 기울인 슬래브 AABB)."""
-    t4 = lambda v: f"{v:.4f}"
-    pitch = -g["tilt"]
-    lamp_rpy = f"0 {math.pi / 2 + pitch:.4f} 0"
-    return f"""<?xml version="1.0"?>
-<sdf version="1.7">
-<model name="runtime_light">
-  <static>true</static>
-  <link name="light">
-    <collision name="collision">
-      <pose>0 0 {t4(g["coll"][2] / 2)} 0 0 0</pose>
-      <geometry><box><size>{g["coll"][0]} {g["coll"][1]} {g["coll"][2]}</size></box></geometry>
-    </collision>
-    <visual name="body">
-      <pose>{t4(g["body"][0])} 0 {t4(g["body"][1])} 0 {pitch:.4f} 0</pose>
-      <geometry><box><size>{g["T"]} {t4(g["W"])} {t4(g["H"])}</size></box></geometry>
-      <material><ambient>0.110 0.110 0.133 1</ambient><diffuse>0.110 0.110 0.133 1</diffuse></material>
-    </visual>
-    <visual name="screen">
-      <pose>{t4(g["screen"][0])} 0 {t4(g["screen"][1])} 0 {pitch:.4f} 0</pose>
-      <geometry><box><size>{g["sT"]} {g["sW"]} {g["sH"]}</size></box></geometry>
-      <material><ambient>0 0 0 1</ambient><diffuse>0 0 0 1</diffuse></material>
-    </visual>
-    <visual name="lamp_red">
-      <pose>{t4(g["lamp_red"][0])} 0 {t4(g["lamp_red"][1])} {lamp_rpy}</pose>
-      <geometry><cylinder><radius>{g["lamp_r"]}</radius><length>{g["lamp_l"]}</length></cylinder></geometry>
-      <material><ambient>0.07 0 0 1</ambient><diffuse>0.07 0 0 1</diffuse></material>
-    </visual>
-    <visual name="lamp_green">
-      <pose>{t4(g["lamp_green"][0])} 0 {t4(g["lamp_green"][1])} {lamp_rpy}</pose>
-      <geometry><cylinder><radius>{g["lamp_r"]}</radius><length>{g["lamp_l"]}</length></cylinder></geometry>
-      <material><ambient>0 1 0 1</ambient><diffuse>0 1 0 1</diffuse><emissive>0 0.5 0 1</emissive></material>
-    </visual>
-  </link>
-</model>
-</sdf>
-"""
 
 _PANEL_SDF_DIR = "/tmp/physicar_light_panels"
 
@@ -559,7 +525,7 @@ def _screen_world_pose(sig, color):
         return wx, wy, pn["pz"]
     return sig["x"], sig["y"], _SCREEN_HIDDEN_Z
 
-def _light_set_pose(world, name, x, y, z, yaw, pitch=0.0):
+def _set_entity_pose(world, name, x, y, z, yaw, pitch=0.0):
     try:
         r = _run_gz_cmd("gz", "service", "-s", f"/world/{world}/set_pose",
                         "--reqtype", "gz.msgs.Pose",
@@ -575,7 +541,7 @@ def _apply_light_state(world, name, sig):
     ok = True
     for color in LIGHT_STATES:
         wx, wy, wz = _screen_world_pose(sig, color)
-        ok = _light_set_pose(world, f"{name}_{color}", wx, wy, wz,
+        ok = _set_entity_pose(world, f"{name}_{color}", wx, wy, wz,
                               sig["yaw"], _sig_pitch(sig)) and ok
     return ok
 
@@ -602,30 +568,18 @@ def _spawn_light_screens(world, name, sig):
             ok = False
     return ok
 
-def _spawn_light(world, name, sig):
-    """Spawn a parametric stand + both screen panels for one runtime-placed light."""
-    ok = True
-    g = _light_geom()
-    sig["panel"] = g["panel"]  # 패널 배치 계약 — 월드 신호등과 동일 경로
-    os.makedirs(_PANEL_SDF_DIR, exist_ok=True)
-    stand_path = os.path.join(_PANEL_SDF_DIR, f"{name}_stand.sdf")
-    with open(stand_path, "w") as f:
-        f.write(_light_stand_sdf(g))
-    try:
-        r = _run_gz_cmd("gz", "service", "-s", f"/world/{world}/create",
-                        "--reqtype", "gz.msgs.EntityFactory",
-                        "--reptype", "gz.msgs.Boolean",
-                        "--timeout", "5000",
-                        "--req", f'sdf_filename: "{stand_path}", '
-                                 f'name: "{name}", '
-                                 f'pose: {{{_pose_fields(sig["x"], sig["y"], 0.0, sig["yaw"])}}}')
-        if r.returncode != 0 or "true" not in r.stdout:
-            logging.error("light spawn failed: %s", name)
-            ok = False
-    except Exception as e:
-        logging.error("light spawn error: %s (%s)", name, e)
-        ok = False
-    return _spawn_light_screens(world, name, sig) and ok
+def _move_light(world, name, x, y, yaw):
+    """신호등 텔레포트 — 스탠드(월드 모델)와 스크린 패널을 함께 옮기고 레지스트리 갱신.
+    노랑 경유 중에도 이동은 허용(상태 기계와 무관 — 패널은 sig 상태 그대로 재배치)."""
+    with _lock:
+        sig = _lights.get(name)
+        if sig is None:
+            return False, None, "light not found"
+        sig = dict(sig, x=round(x, 6), y=round(y, 6), yaw=round(yaw, 6))
+        _lights[name] = sig
+    ok = _set_entity_pose(world, name, x, y, 0.0, yaw)
+    ok = _apply_light_state(world, name, sig) and ok
+    return ok, sig, (None if ok else "pose change failed")
 
 def _set_light_target(world, name, target):
     """목적 상태 적용. green→red 는 노랑(YELLOW_S초) 자동 경유, 경유 중엔 명령 잠금."""
@@ -678,6 +632,7 @@ def _scan_world_lights(world):
     world_el = root.find("world")
     if world_el is None:
         return
+    seen = set()
     for m in world_el.findall("model"):
         name = m.get("name") or ""
         # 신호등 판별: link 이름이 'light' (Custom World Builder 계약 마커 —
@@ -727,36 +682,13 @@ def _scan_world_lights(world):
             if panel:
                 sig["panel"] = panel
             _lights[name] = sig
+        seen.add(name)
         logging.info("world light registered: %s", name)
         _spawn_light_screens(world, name, sig)
-
-def _remove_light(world, name):
-    """Remove pole/housing + lamps of one light from the world."""
-    for ename in (name, f"{name}_red", f"{name}_green"):
-        try:
-            _run_gz_cmd("gz", "service", "-s", f"/world/{world}/remove",
-                        "--reqtype", "gz.msgs.Entity",
-                        "--reptype", "gz.msgs.Boolean",
-                        "--timeout", "3000",
-                        "--req", f'name: "{ename}", type: MODEL')
-        except Exception:
-            pass
-
-def _restore_lights(world):
-    """Re-spawn runtime-placed lights after a world (re)start.
-
-    builtin(월드 정의) 신호등은 _scan_world_lights가 처리한다.
-    노랑 경유 중 재시작이면 타이머가 소실되므로 목적 상태(red)로 정리.
-    """
+    # 이전 월드 파일 버전의 잔재 정리 (같은 이름 월드가 교체 업로드된 경우)
     with _lock:
-        for _n, _s in list(_lights.items()):
-            if _s.get("state") == "yellow":
-                _lights[_n] = dict(_s, state="red")
-    with _lock:
-        sigs = {n: s for n, s in _lights.items() if not s.get("builtin")}
-    for name, sig in sigs.items():
-        logging.info("restoring light %s", name)
-        _spawn_light(world, name, sig)
+        for stale in [n for n in _lights if n not in seen]:
+            _lights.pop(stale, None)
 
 # ─── Track bounds ──────────────────────────────────────────────────────
 _track_bounds_cache = {}
@@ -881,7 +813,6 @@ def start_sim(world_file):
                         logging.error("gz sim died after spawn (exit %s)", proc.returncode)
                         return
                     _scan_world_lights(wname)
-                    _restore_lights(wname)
                     logging.info("physicar spawned, starting gz-launch")
                     _start_launch()
                 finally:
@@ -1066,7 +997,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._json(404, {"error": "not found"})
 
     def do_POST(self):
-        global _sim_proc, _current_world, _launch_proc, _fail_count, _light_counter
+        global _sim_proc, _current_world, _launch_proc, _fail_count
         if self.path == "/respawn":
             with _lock:
                 world = _current_world
@@ -1246,14 +1177,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     pass
                 logging.info("upload cancelled: %s", upload_id)
             self._json(200, {"ok": True})
-        elif self.path == "/stop":
-            _kill_all_gz()
-            with _lock:
-                _sim_proc = None
-                _launch_proc = None
-                _current_world = None
-            self._json(200, {"ok": True})
-        elif self.path == "/traffic_lights":
+        elif self.path == "/pose":
+            # 차량 텔레포트 — 생략된 좌표는 현재 포즈 유지.
+            # z=0.05·roll/pitch=0 으로 정규화: 뒤집힌/올라탄 차를 일으켜 세우는 동작 겸용.
+            # 주의: odom(라이다 PLICP + IMU EKF)은 텔레포트를 모름 — 추정치에 오프셋이
+            # 남을 수 있다. 완전한 초기화가 필요하면 /respawn (odom 스택도 재시작됨).
             with _lock:
                 world = _current_world
                 switching = _switching
@@ -1263,39 +1191,95 @@ class Handler(http.server.BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length)) if length else {}
             try:
-                x = float(body.get("x"))
-                y = float(body.get("y"))
-                yaw = float(body.get("yaw", 0.0))
+                x = None if body.get("x") is None else float(body.get("x"))
+                y = None if body.get("y") is None else float(body.get("y"))
+                yaw = None if body.get("yaw") is None else float(body.get("yaw"))
             except (TypeError, ValueError):
-                self._json(400, {"error": "x and y must be numbers"})
+                self._json(400, {"error": "x, y, yaw must be numbers"})
                 return
+            if x is None or y is None or yaw is None:
+                cur = _get_vehicle_pose(world)
+                if cur is None:
+                    self._json(503, {"error": "current pose not available"})
+                    return
+                x = cur["x"] if x is None else x
+                y = cur["y"] if y is None else y
+                yaw = cur["yaw"] if yaw is None else yaw
             if not (-100 <= x <= 100 and -100 <= y <= 100):
                 self._json(400, {"error": "position out of range"})
                 return
-            state = body.get("state", "green")
-            if state not in LIGHT_STATES:
-                self._json(400, {"error": f"state must be one of {list(LIGHT_STATES)}"})
+            if not _set_entity_pose(world, "physicar", x, y, 0.05, yaw):
+                self._json(500, {"error": "pose change failed"})
                 return
+            logging.info("vehicle teleported to (%.2f, %.2f, yaw %.2f)", x, y, yaw)
+            self._json(200, {"ok": True, "pose": {"x": round(x, 6), "y": round(y, 6), "z": 0.05, "yaw": round(yaw, 6)}})
+        elif re.match(r'^/models/[\w]+/pose$', self.path):
+            # 월드 물체 텔레포트 (Custom World Builder 오브젝트·신호등).
+            # 생략된 좌표는 현재 포즈(비정적=실시간, 정적=SDF 원점) 유지. 회전은 yaw만
+            # (World Builder와 동일 — 물체는 항상 세워진 자세로 배치된다).
+            name = self.path.split("/")[2]
             with _lock:
-                if len(_lights) >= 20:
-                    self._json(409, {"error": "too many lights (max 20)"})
-                    return
-                _light_counter += 1
-                name = f"light_{_light_counter}"
-                while name in _lights:
-                    _light_counter += 1
-                    name = f"light_{_light_counter}"
-                sig = {"x": round(x, 6), "y": round(y, 6),
-                       "yaw": round(yaw, 6), "state": state}
-                _lights[name] = sig
-            if not _spawn_light(world, name, sig):
-                with _lock:
-                    _lights.pop(name, None)
-                _remove_light(world, name)
-                self._json(500, {"error": "spawn failed"})
+                world = _current_world
+                switching = _switching
+                is_light = name in _lights
+            if not world or switching:
+                self._json(409, {"error": "world not ready"})
                 return
-            logging.info("light placed: %s at (%.2f, %.2f)", name, x, y)
-            self._json(200, {"ok": True, "light": {"name": name, **sig}})
+            if name in ("physicar", "racetrack", "sun"):
+                self._json(403, {"error": "use POST /pose for the vehicle" if name == "physicar"
+                                 else f"{name} cannot be moved"})
+                return
+            # 신호등 스크린 패널은 내부 구현물 — 본체 신호등을 옮겨야 한다
+            pm = re.match(r'^(.+)_(red|yellow|green)$', name)
+            if pm:
+                with _lock:
+                    if pm.group(1) in _lights:
+                        self._json(403, {"error": f"screen panel — move the light '{pm.group(1)}' instead"})
+                        return
+            items = _get_builtin_obstacles(world) or []
+            item = next((i for i in items if i["name"] == name), None)
+            if item is None and not is_light:
+                self._json(404, {"error": "model not found in world"})
+                return
+            if item is not None and item.get("type") == "wall":
+                self._json(403, {"error": "wall cannot be moved"})
+                return
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length)) if length else {}
+            cur = (item or {}).get("current") or {"x": 0.0, "y": 0.0, "z": 0.0, "yaw": 0.0}
+            try:
+                x = float(body["x"]) if body.get("x") is not None else cur["x"]
+                y = float(body["y"]) if body.get("y") is not None else cur["y"]
+                z = float(body["z"]) if body.get("z") is not None else cur["z"]
+                yaw = float(body["yaw"]) if body.get("yaw") is not None else cur["yaw"]
+            except (TypeError, ValueError):
+                self._json(400, {"error": "x, y, z, yaw must be numbers"})
+                return
+            if not (-100 <= x <= 100 and -100 <= y <= 100 and -10 <= z <= 100):
+                self._json(400, {"error": "position out of range"})
+                return
+            if is_light:
+                ok, sig, err = _move_light(world, name, x, y, yaw)
+                if not ok:
+                    self._json(404 if err == "light not found" else 500, {"error": err})
+                    return
+                logging.info("light moved: %s to (%.2f, %.2f, yaw %.2f)", name, x, y, yaw)
+                self._json(200, {"ok": True, "model": {"name": name, "x": sig["x"], "y": sig["y"], "z": 0.0, "yaw": sig["yaw"], "type": "light"}})
+                return
+            if not _set_entity_pose(world, name, x, y, z, yaw):
+                self._json(500, {"error": "pose change failed"})
+                return
+            logging.info("model moved: %s to (%.2f, %.2f, %.2f, yaw %.2f)", name, x, y, z, yaw)
+            self._json(200, {"ok": True, "model": {"name": name, "x": round(x, 6), "y": round(y, 6),
+                                                   "z": round(z, 6), "yaw": round(yaw, 6),
+                                                   "type": item.get("type", "model")}})
+        elif self.path == "/stop":
+            _kill_all_gz()
+            with _lock:
+                _sim_proc = None
+                _launch_proc = None
+                _current_world = None
+            self._json(200, {"ok": True})
         elif re.match(r'^/traffic_lights/[\w]+$', self.path):
             name = self.path.rsplit("/", 1)[1]
             with _lock:
@@ -1319,26 +1303,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._json(404, {"error": "not found"})
 
     def do_DELETE(self):
-        m = re.match(r'^/traffic_lights/([\w]+)$', self.path)
-        if m:
-            name = m.group(1)
-            with _lock:
-                world = _current_world
-                sig = _lights.get(name)
-                if sig and sig.get("builtin"):
-                    sig = "builtin"
-                else:
-                    sig = _lights.pop(name, None)
-            if sig == "builtin":
-                self._json(403, {"error": "world-defined light cannot be deleted"})
-                return
-            if not world or sig is None:
-                self._json(404, {"error": "light not found"})
-                return
-            _remove_light(world, name)
-            logging.info("light removed: %s", name)
-            self._json(200, {"ok": True, "deleted": name})
-            return
         m = re.match(r'^/worlds/([\w]+)$', self.path)
         if m:
             world_name = m.group(1)

@@ -21,23 +21,30 @@ An HTTP API for track management and vehicle state queries is served under the `
 |--------|------|-------------|
 | `GET` | `/sim/api/status` | Simulator runtime status |
 | `GET` | `/sim/api/pose` | Vehicle pose (world absolute coordinates) |
+| `POST` | `/sim/api/pose` | Teleport the vehicle (`{"x": 1.0, "y": 2.0, "yaw": 0.0}` — omitted fields keep their current value; the pose is normalized upright at ground level, so this also rights a flipped car) |
 | `GET` | `/sim/api/route` | Track waypoints (route) |
 | `GET` | `/sim/api/track_bounds` | Track bounds (bounding box) |
-| `GET` | `/sim/api/obstacles` | World obstacles (boxes) query |
+| `GET` | `/sim/api/obstacles` | World models query (name, `type`: object/wall/light, static, movable, origin/current pose, size) |
+| `POST` | `/sim/api/models/<name>/pose` | Move/rotate a world object (`{"x": 1.0, "y": 2.0, "z": 0.1, "yaw": 0.0}` — omitted fields keep their current value; rotation is yaw-only. Works for World Builder objects and traffic lights; walls and the track itself are rejected) |
 | `GET` | `/sim/api/worlds` | World list (includes the current world) |
 | `POST` | `/sim/api/respawn` | Reload the world to reset all objects to their start state |
 | `POST` | `/sim/api/switch` | Switch world (`{"world": "<name>.world"}`) |
-| `GET` | `/sim/api/traffic_lights` | List placed traffic lights and their states |
-| `POST` | `/sim/api/traffic_lights` | Place a traffic light (`{"x": 1.0, "y": 2.0, "yaw": 0.0, "state": "red"}`) |
-| `POST` | `/sim/api/traffic_lights/<name>` | Change a signal state (`{"state": "red"}` or `{"state": "green"}`) |
-| `DELETE` | `/sim/api/traffic_lights/<name>` | Remove a traffic light |
+| `GET` | `/sim/api/traffic_lights` | List the world's traffic lights and their states |
+| `POST` | `/sim/api/traffic_lights/<name>` | Change a light state (`{"state": "red"}` or `{"state": "green"}` — green→red passes through 3 s of yellow, during which commands are rejected with 409) |
 
-Traffic lights can also be placed and controlled from the web viewer (🚦 Signal menu).
-They survive a respawn of the same world and are cleared on world switch.
+The web viewer supports World Builder-style direct manipulation: click an object to
+select it (white box), drag to move it, and drag the blue dot handle to rotate it.
+The change is applied through the pose API when you release. Clicking a traffic
+light opens its control panel (RED/GREEN) on the right side. The vehicle can be
+moved the same way — its pose is normalized upright, and since odometry
+(lidar + IMU) cannot observe a teleport, use **Respawn** afterwards if you need a
+clean odometry state.
 
-Custom World Builder tracks may include `signal_*` models (tablet-stand signals).
-These are detected on world load, appear in the same list/API with `"builtin": true`,
-and can be controlled but not deleted. Default state is `green`.
+Traffic lights come from the world itself: Custom World Builder tracks may include
+light models (`<link name="light">` marker — the legacy `signal` marker is still
+recognized). They are detected on world load and controlled via the panel or the
+API above. Default state is `green`; states survive a respawn of the same world.
+Runtime light placement was removed — place lights in the World Builder instead.
 
 ## License
 

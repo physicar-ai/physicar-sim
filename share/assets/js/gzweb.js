@@ -168,6 +168,7 @@ function connect() {
     document.getElementById("respawn-btn").disabled = false;
     // Sync world list on every (re)connect
     loadWorlds();
+    _refreshLights();
   });
   
   gz.on("close", function() {
@@ -323,7 +324,9 @@ function connect() {
           for (var j = 0; j < msg.pose.length; ++j) {
             var p = msg.pose[j];
             var e = scene.getByName(p.name);
-            if (e && e !== scene.modelManipulator.object && e.parent !== scene.modelManipulator.object) {
+            if (e && e !== scene.modelManipulator.object && e.parent !== scene.modelManipulator.object
+                && !(gzInteract && gzInteract.isManipulating(p.name))
+                && !(_poseHold[p.name] && _poseHold[p.name] > Date.now())) {
               scene.updatePose(e, p.position, p.orientation);
             } else if (!e && !knownModels[p.name] && p.name !== currentWorld) {
               needRefresh = true;
@@ -387,6 +390,7 @@ function init() {
   var el = document.getElementById("container");
   el.appendChild(scene.renderer.domElement);
   scene.setSize(el.clientWidth, el.clientHeight);
+  _initInteract(el);
   var cam = scene.camera;
   cam.near = 0.1; cam.far = 10000; cam.updateProjectionMatrix();
   scene.scene.fog = null;
@@ -642,75 +646,164 @@ document.addEventListener("click", function(e) {
 });
 
 // =====================================================================
-// Traffic Lights
+// Object Manipulation (World Builder 상호작용 계약 — gz-interact.js 공유 모듈)
+//  + Traffic Light Control Panel (신호등 클릭 → 우측 제어 패널)
 // =====================================================================
-var _lightPlacing = false;
-var _lightDown = null;
+var gzInteract = null;
+var _lightsCache = {};   // name -> {state, builtin, x, y, yaw}
+var _poseHold = {};      // name -> ms timestamp — 커밋 직후 스트림 포즈 반영 억제
+var _selLight = null;
+var _yellowTimer = null;
+var _manipHintShown = false;
+var _vehicleHintShown = false;
 
-function toggleLightMenu() {
-  if (!_controlsEnabled) return;
-  var menu = document.getElementById("light-menu");
-  if (menu.classList.contains("open")) {
-    menu.classList.remove("open");
-  } else {
-    closeDropdown();
-    loadLights();
-    menu.classList.add("open");
-  }
-}
-
-function loadLights() {
+function _refreshLights(cb) {
   fetch("/sim/api/traffic_lights")
     .then(function(r) { return r.json(); })
-    .then(function(data) { renderLightMenu(data.lights || []); })
-    .catch(function() { renderLightMenu([]); });
+    .then(function(d) {
+      _lightsCache = {};
+      (d.lights || []).forEach(function(l) { _lightsCache[l.name] = l; });
+      if (_selLight) { _renderLightPanel(); }
+      if (cb) { cb(); }
+    })
+    .catch(function() { if (cb) { cb(); } });
 }
 
-function renderLightMenu(lights) {
-  var menu = document.getElementById("light-menu");
-  menu.innerHTML = "";
-  if (lights.length === 0) {
-    var empty = document.createElement("div");
-    empty.className = "dropdown-item light-empty";
-    empty.textContent = "No lights";
-    menu.appendChild(empty);
+// 픽킹 대상 판별 — 최상위 모델의 link(자식) 이름 마커로 종류 결정
+// (Custom World Builder 계약: object/wall/light — 'signal'은 구 마커)
+function _resolveTarget(top, leaf) {
+  var name = top.name;
+  if (!name || name === 'plane' || name === 'grid' || name === 'racetrack' ||
+      name === 'sun' || name === 'GRADIENT_SKY' || name === 'boundingBox' ||
+      name === currentWorld) {
+    return null;
   }
-  lights.forEach(function(s) {
-    var row = document.createElement("div");
-    row.className = "dropdown-item light-item";
-    var label = document.createElement("span");
-    label.textContent = s.name;
-    label.style.flex = "1";
-    row.appendChild(label);
-    var pill = document.createElement("span");
-    pill.className = "light-pill light-" + s.state;
-    pill.textContent = s.state.toUpperCase();
-    pill.title = "Toggle state";
-    pill.onclick = function(e) {
-      e.stopPropagation();
-      if (s.state === "yellow") return; // 노랑 경유 중 — 잠금 (완료 후 조작)
-      setLightState(s.name, s.state === "red" ? "green" : "red");
-    };
-    row.appendChild(pill);
-    // 월드(트랙)에 정의된 신호등은 삭제 불가 — 상태 제어만
-    if (!s.builtin) {
-      var del = document.createElement("span");
-      del.className = "del-btn";
-      del.innerHTML = "&#x1f5d1;";
-      del.title = "Delete " + s.name;
-      del.onclick = function(e) { e.stopPropagation(); deleteLight(s.name); };
-      row.appendChild(del);
-    }
-    menu.appendChild(row);
+  // 신호등 스크린 패널(런타임 스폰) 클릭 → 본체 신호등으로 승격
+  var pm = name.match(/^(.+)_(red|yellow|green)$/);
+  if (pm && _lightsCache[pm[1]]) {
+    var stand = scene.getByName(pm[1]);
+    return stand ? _lightTarget(stand, pm[1]) : null;
+  }
+  var marker = null;
+  for (var i = 0; i < top.children.length; i++) {
+    var n = top.children[i].name;
+    if (n === 'wall' || n === 'light' || n === 'signal' || n === 'object') { marker = n; break; }
+  }
+  if (marker === 'wall') { return null; }        // 벽은 이동 불가 (WB와 동일)
+  if (marker === 'light' || marker === 'signal' || _lightsCache[name]) {
+    return _lightTarget(top, name);
+  }
+  if (name === 'physicar') { return { obj: top, name: name, kind: 'vehicle' }; }
+  return { obj: top, name: name, kind: 'object' };
+}
+
+// 신호등 = 스탠드 + 스크린 패널 3장(런타임 모델)이 강체로 함께 움직인다
+function _lightTarget(stand, name) {
+  var att = [];
+  ['red', 'yellow', 'green'].forEach(function(c) {
+    var panel = scene.getByName(name + '_' + c);
+    if (panel) { att.push(panel); }
   });
-  var add = document.createElement("div");
-  add.className = "dropdown-item light-add";
-  add.textContent = "＋ Add Light";
-  add.onclick = function() { startLightPlacement(); };
-  menu.appendChild(add);
+  return { obj: stand, name: name, kind: 'light', attachments: att };
+}
+
+function _onSelect(sel) {
+  if (sel.kind === 'light') {
+    _showLightPanel(sel.name);
+  } else {
+    _hideLightPanel();
+  }
+  if (!_manipHintShown) {
+    _manipHintShown = true;
+    _showToast("Drag to move \u00b7 blue dot to rotate \u00b7 Esc to deselect", 4000);
+  }
+}
+
+function _onDeselect() {
+  _hideLightPanel();
+}
+
+// 조작 확정 — 놓는 순간 pose API 호출 (WB commitManipulation의 sim 구현)
+function _commitPose(sel, pose) {
+  var names = [sel.name].concat((sel.attachments || []).map(function(o) { return o.name; }));
+  names.forEach(function(n) { _poseHold[n] = Date.now() + 3000; });
+  function release() { names.forEach(function(n) { delete _poseHold[n]; }); }
+  var url, body;
+  if (sel.kind === 'vehicle') {
+    url = "/sim/api/pose";
+    body = { x: pose.x, y: pose.y, yaw: pose.yaw };
+  } else {
+    url = "/sim/api/models/" + sel.name + "/pose";
+    body = { x: pose.x, y: pose.y, yaw: pose.yaw };
+    if (sel.kind !== 'light') { body.z = pose.z; }
+  }
+  fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(d) {
+    release(); // 서버 적용 완료 — 다음 스트림 프레임부터 실제 포즈 반영
+    if (!d.ok) {
+      _showToast(d.error || "Move failed");
+    } else if (sel.kind === 'vehicle' && !_vehicleHintShown) {
+      _vehicleHintShown = true;
+      _showToast("Vehicle teleported \u2014 odometry may drift. Use Respawn for a clean reset.", 5000);
+    }
+  })
+  .catch(function() { release(); _showToast("Move failed"); });
+}
+
+function _initInteract(container) {
+  gzInteract = GzInteract.create({
+    THREE: THREE,
+    scene: scene,
+    container: container,
+    resolveTarget: _resolveTarget,
+    onSelect: _onSelect,
+    onDeselect: _onDeselect,
+    onCommit: _commitPose
+  });
+}
+
+// ── 신호등 제어 패널 (우측) ──
+function _showLightPanel(name) {
+  _selLight = name;
+  _renderLightPanel();
+  document.getElementById("light-panel").classList.add("show");
+  _refreshLights(_pollYellow);
+}
+
+function _hideLightPanel() {
+  _selLight = null;
+  document.getElementById("light-panel").classList.remove("show");
+  if (_yellowTimer) { clearTimeout(_yellowTimer); _yellowTimer = null; }
+}
+
+function _renderLightPanel() {
+  if (!_selLight) { return; }
+  var st = (_lightsCache[_selLight] || {}).state || "...";
+  document.getElementById("lp-name").textContent = _selLight;
+  var pill = document.getElementById("lp-pill");
+  pill.className = "light-pill light-" + st;
+  pill.textContent = st.toUpperCase();
+  // 노랑 경유 중엔 잠금 (sim_api도 409로 거부한다)
+  document.getElementById("lp-red").disabled = (st === "yellow" || st === "red");
+  document.getElementById("lp-green").disabled = (st === "yellow" || st === "green");
+}
+
+// 노랑 경유(3초) 동안만 짧게 폴링해 완료 상태를 패널에 반영
+function _pollYellow() {
+  if (_yellowTimer) { clearTimeout(_yellowTimer); _yellowTimer = null; }
+  var l = _lightsCache[_selLight];
+  if (l && l.state === "yellow") {
+    _yellowTimer = setTimeout(function() { _refreshLights(_pollYellow); }, 700);
+  }
 }
 
 function setLightState(name, state) {
+  if (!name) { return; }
   fetch("/sim/api/traffic_lights/" + name, {
     method: "POST",
     headers: {"Content-Type": "application/json"},
@@ -718,102 +811,11 @@ function setLightState(name, state) {
   })
   .then(function(r) { return r.json(); })
   .then(function(d) {
-    if (!d.ok) _showToast(d.error || "State change failed");
-    loadLights();
+    if (!d.ok) { _showToast(d.error || "State change failed"); }
+    _refreshLights(_pollYellow);
   })
   .catch(function() { _showToast("State change failed"); });
 }
-
-function deleteLight(name) {
-  if (!confirm("Delete " + name + "?")) return;
-  fetch("/sim/api/traffic_lights/" + name, { method: "DELETE" })
-    .then(function(r) { return r.json(); })
-    .then(function(d) {
-      if (d.ok) {
-        // The viewer cannot remove entities incrementally — reload the scene
-        _showToast("Light removed, reloading...");
-        setTimeout(function() { location.reload(); }, 800);
-      } else {
-        _showToast(d.error || "Delete failed");
-      }
-    })
-    .catch(function() { _showToast("Delete failed"); });
-}
-
-function startLightPlacement() {
-  document.getElementById("light-menu").classList.remove("open");
-  _lightPlacing = true;
-  document.getElementById("container").style.cursor = "crosshair";
-  _showToast("Click on the ground to place the traffic light (Esc to cancel)", 6000);
-}
-
-function _cancelLightPlacement() {
-  _lightPlacing = false;
-  _lightDown = null;
-  document.getElementById("container").style.cursor = "";
-}
-
-function _placeLightAt(clientX, clientY) {
-  var el = scene.renderer.domElement;
-  var rect = el.getBoundingClientRect();
-  var ndc = {
-    x: ((clientX - rect.left) / rect.width) * 2 - 1,
-    y: -((clientY - rect.top) / rect.height) * 2 + 1
-  };
-  var raycaster = new THREE.Raycaster();
-  raycaster.setFromCamera(ndc, scene.camera);
-  var pt = new THREE.Vector3();
-  var hit = raycaster.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 0, 1), 0), pt);
-  if (!hit) { _showToast("Could not find the ground here"); return; }
-  // Face the lamps toward the camera so the placed state is visible
-  var yaw = Math.atan2(scene.camera.position.y - pt.y, scene.camera.position.x - pt.x);
-  fetch("/sim/api/traffic_lights", {
-    method: "POST",
-    headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({x: pt.x, y: pt.y, yaw: yaw})
-  })
-  .then(function(r) { return r.json(); })
-  .then(function(d) {
-    if (d.ok) {
-      _showToast(d.light.name + " placed");
-    } else {
-      _showToast(d.error || "Placement failed");
-    }
-  })
-  .catch(function() { _showToast("Placement failed"); });
-}
-
-// Capture-phase handlers so a placement click doesn't rotate the camera
-(function() {
-  var el = document.getElementById("container") || document.body;
-  window.addEventListener("load", function() {
-    el = document.getElementById("container");
-    el.addEventListener("mousedown", function(e) {
-      if (!_lightPlacing || e.button !== 0) return;
-      _lightDown = {x: e.clientX, y: e.clientY};
-      e.stopPropagation();
-    }, true);
-    el.addEventListener("mouseup", function(e) {
-      if (!_lightPlacing || !_lightDown) return;
-      var dx = e.clientX - _lightDown.x, dy = e.clientY - _lightDown.y;
-      var moved = Math.sqrt(dx * dx + dy * dy) > 6;
-      _lightDown = null;
-      if (moved) return; // was a drag, not a click
-      e.stopPropagation();
-      var cx = e.clientX, cy = e.clientY;
-      _cancelLightPlacement();
-      _placeLightAt(cx, cy);
-    }, true);
-  });
-  document.addEventListener("keydown", function(e) {
-    if (e.key === "Escape" && _lightPlacing) _cancelLightPlacement();
-  });
-  document.addEventListener("click", function(e) {
-    if (!e.target.closest("#light-wrap")) {
-      document.getElementById("light-menu").classList.remove("open");
-    }
-  });
-})();
 
 // =====================================================================
 // Distance-based Audio Volume
@@ -1333,6 +1335,7 @@ function toggleAutoFollow(on) {
 
 function _updateAutoFollow() {
   if (!_autoFollow) return;
+  if (gzInteract && gzInteract.isManipulating('physicar')) return;
   var obj = scene.getByName('physicar');
   if (!obj) return;
   var target = new THREE.Vector3();
@@ -1363,6 +1366,7 @@ document.addEventListener("click", function(e) {
 function animate() {
   requestAnimationFrame(animate);
   _updateAutoFollow();
+  if (gzInteract && gzInteract.selected()) gzInteract.update();
   _updateAxes();
   _updateLidar();
   _updatePose();
