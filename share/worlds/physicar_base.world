@@ -36,9 +36,9 @@
     <pose>0 0 0 0 0 0</pose>
     <name>racetrack</name>
   </include>
-  <model name="box_1">
+  <model name="box2">
     <pose>2.9660 2.7780 0.1210 0 0 0.0000</pose>
-    <link name="link">
+    <link name="object">
       <inertial>
         <mass>0.5</mass>
         <inertia>
@@ -52,15 +52,15 @@
       </collision>
       <visual name="visual">
         <geometry>
-          <mesh><uri>model://meshes/physicar_base/box_1.dae</uri></mesh>
+          <mesh><uri>model://meshes/physicar_box_obstacle/physicar_box_obstacle.dae</uri></mesh>
         </geometry>
       </visual>
     </link>
     <static>false</static>
   </model>
-  <model name="box_0">
+  <model name="box1">
     <pose>2.0577 2.7779 0.1210 0 0 0.0000</pose>
-    <link name="link">
+    <link name="object">
       <inertial>
         <mass>0.5</mass>
         <inertia>
@@ -74,11 +74,40 @@
       </collision>
       <visual name="visual">
         <geometry>
-          <mesh><uri>model://meshes/physicar_base/box_0.dae</uri></mesh>
+          <mesh><uri>model://meshes/physicar_box_obstacle/physicar_box_obstacle.dae</uri></mesh>
         </geometry>
       </visual>
     </link>
     <static>false</static>
+  </model>
+  <!-- perimeter fence collision markers: crash detection via TrackData (visual/physics collision is in the racetrack wall mesh) -->
+  <model name="wall_0">
+    <pose>2.5 -0.02 0.2 0 0 0</pose>
+    <link name="wall">
+      <collision name="collision"><geometry><box><size>5.08 0.04 0.4</size></box></geometry></collision>
+    </link>
+    <static>true</static>
+  </model>
+  <model name="wall_1">
+    <pose>2.5 5.02 0.2 0 0 0</pose>
+    <link name="wall">
+      <collision name="collision"><geometry><box><size>5.08 0.04 0.4</size></box></geometry></collision>
+    </link>
+    <static>true</static>
+  </model>
+  <model name="wall_2">
+    <pose>-0.02 2.5 0.2 0 0 0</pose>
+    <link name="wall">
+      <collision name="collision"><geometry><box><size>0.04 5.0 0.4</size></box></geometry></collision>
+    </link>
+    <static>true</static>
+  </model>
+  <model name="wall_3">
+    <pose>5.02 2.5 0.2 0 0 0</pose>
+    <link name="wall">
+      <collision name="collision"><geometry><box><size>0.04 5.0 0.4</size></box></geometry></collision>
+    </link>
+    <static>true</static>
   </model>
   <physics name="default_physics" type="ode">
     <max_step_size>0.005</max_step_size>

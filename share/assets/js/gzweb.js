@@ -642,6 +642,180 @@ document.addEventListener("click", function(e) {
 });
 
 // =====================================================================
+// Traffic Lights
+// =====================================================================
+var _lightPlacing = false;
+var _lightDown = null;
+
+function toggleLightMenu() {
+  if (!_controlsEnabled) return;
+  var menu = document.getElementById("light-menu");
+  if (menu.classList.contains("open")) {
+    menu.classList.remove("open");
+  } else {
+    closeDropdown();
+    loadLights();
+    menu.classList.add("open");
+  }
+}
+
+function loadLights() {
+  fetch("/sim/api/traffic_lights")
+    .then(function(r) { return r.json(); })
+    .then(function(data) { renderLightMenu(data.lights || []); })
+    .catch(function() { renderLightMenu([]); });
+}
+
+function renderLightMenu(lights) {
+  var menu = document.getElementById("light-menu");
+  menu.innerHTML = "";
+  if (lights.length === 0) {
+    var empty = document.createElement("div");
+    empty.className = "dropdown-item light-empty";
+    empty.textContent = "No lights";
+    menu.appendChild(empty);
+  }
+  lights.forEach(function(s) {
+    var row = document.createElement("div");
+    row.className = "dropdown-item light-item";
+    var label = document.createElement("span");
+    label.textContent = s.name;
+    label.style.flex = "1";
+    row.appendChild(label);
+    var pill = document.createElement("span");
+    pill.className = "light-pill light-" + s.state;
+    pill.textContent = s.state.toUpperCase();
+    pill.title = "Toggle state";
+    pill.onclick = function(e) {
+      e.stopPropagation();
+      if (s.state === "yellow") return; // 노랑 경유 중 — 잠금 (완료 후 조작)
+      setLightState(s.name, s.state === "red" ? "green" : "red");
+    };
+    row.appendChild(pill);
+    // 월드(트랙)에 정의된 신호등은 삭제 불가 — 상태 제어만
+    if (!s.builtin) {
+      var del = document.createElement("span");
+      del.className = "del-btn";
+      del.innerHTML = "&#x1f5d1;";
+      del.title = "Delete " + s.name;
+      del.onclick = function(e) { e.stopPropagation(); deleteLight(s.name); };
+      row.appendChild(del);
+    }
+    menu.appendChild(row);
+  });
+  var add = document.createElement("div");
+  add.className = "dropdown-item light-add";
+  add.textContent = "＋ Add Light";
+  add.onclick = function() { startLightPlacement(); };
+  menu.appendChild(add);
+}
+
+function setLightState(name, state) {
+  fetch("/sim/api/traffic_lights/" + name, {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({state: state})
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(d) {
+    if (!d.ok) _showToast(d.error || "State change failed");
+    loadLights();
+  })
+  .catch(function() { _showToast("State change failed"); });
+}
+
+function deleteLight(name) {
+  if (!confirm("Delete " + name + "?")) return;
+  fetch("/sim/api/traffic_lights/" + name, { method: "DELETE" })
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (d.ok) {
+        // The viewer cannot remove entities incrementally — reload the scene
+        _showToast("Light removed, reloading...");
+        setTimeout(function() { location.reload(); }, 800);
+      } else {
+        _showToast(d.error || "Delete failed");
+      }
+    })
+    .catch(function() { _showToast("Delete failed"); });
+}
+
+function startLightPlacement() {
+  document.getElementById("light-menu").classList.remove("open");
+  _lightPlacing = true;
+  document.getElementById("container").style.cursor = "crosshair";
+  _showToast("Click on the ground to place the traffic light (Esc to cancel)", 6000);
+}
+
+function _cancelLightPlacement() {
+  _lightPlacing = false;
+  _lightDown = null;
+  document.getElementById("container").style.cursor = "";
+}
+
+function _placeLightAt(clientX, clientY) {
+  var el = scene.renderer.domElement;
+  var rect = el.getBoundingClientRect();
+  var ndc = {
+    x: ((clientX - rect.left) / rect.width) * 2 - 1,
+    y: -((clientY - rect.top) / rect.height) * 2 + 1
+  };
+  var raycaster = new THREE.Raycaster();
+  raycaster.setFromCamera(ndc, scene.camera);
+  var pt = new THREE.Vector3();
+  var hit = raycaster.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 0, 1), 0), pt);
+  if (!hit) { _showToast("Could not find the ground here"); return; }
+  // Face the lamps toward the camera so the placed state is visible
+  var yaw = Math.atan2(scene.camera.position.y - pt.y, scene.camera.position.x - pt.x);
+  fetch("/sim/api/traffic_lights", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({x: pt.x, y: pt.y, yaw: yaw})
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(d) {
+    if (d.ok) {
+      _showToast(d.light.name + " placed");
+    } else {
+      _showToast(d.error || "Placement failed");
+    }
+  })
+  .catch(function() { _showToast("Placement failed"); });
+}
+
+// Capture-phase handlers so a placement click doesn't rotate the camera
+(function() {
+  var el = document.getElementById("container") || document.body;
+  window.addEventListener("load", function() {
+    el = document.getElementById("container");
+    el.addEventListener("mousedown", function(e) {
+      if (!_lightPlacing || e.button !== 0) return;
+      _lightDown = {x: e.clientX, y: e.clientY};
+      e.stopPropagation();
+    }, true);
+    el.addEventListener("mouseup", function(e) {
+      if (!_lightPlacing || !_lightDown) return;
+      var dx = e.clientX - _lightDown.x, dy = e.clientY - _lightDown.y;
+      var moved = Math.sqrt(dx * dx + dy * dy) > 6;
+      _lightDown = null;
+      if (moved) return; // was a drag, not a click
+      e.stopPropagation();
+      var cx = e.clientX, cy = e.clientY;
+      _cancelLightPlacement();
+      _placeLightAt(cx, cy);
+    }, true);
+  });
+  document.addEventListener("keydown", function(e) {
+    if (e.key === "Escape" && _lightPlacing) _cancelLightPlacement();
+  });
+  document.addEventListener("click", function(e) {
+    if (!e.target.closest("#light-wrap")) {
+      document.getElementById("light-menu").classList.remove("open");
+    }
+  });
+})();
+
+// =====================================================================
 // Distance-based Audio Volume
 // =====================================================================
 var _distanceVolumeEnabled = true;
@@ -1476,88 +1650,33 @@ function stopAllAudio() {
 }
 
 // =====================================================================
-// Model Creation
+// Model Creation — 공유 모듈 gz-scene.js가 단일 소스
+// (Custom World Builder 뷰포트와 동일한 코드로 그린다. 시맨틱 수정은
+//  반드시 gz-scene.js에서 할 것 — 사이트 쪽 사본과 동기화 필요)
 // =====================================================================
-
-function createModelFromMsg(model) {
-  var obj = new THREE.Object3D(); obj.name = model.name; obj.userData.id = model.id;
-  if (model.pose) scene.setPose(obj, model.pose.position, model.pose.orientation);
-  for (var j = 0; j < model.link.length; ++j) {
-    var link = model.link[j], lo = new THREE.Object3D(); lo.name = link.name; lo.userData.id = link.id;
-    if (link.pose) scene.setPose(lo, link.pose.position, link.pose.orientation);
-    obj.add(lo);
-    for (var k = 0; k < link.visual.length; ++k) {
-      var v = createVisualFromMsg(link.visual[k]); if (v && !v.parent) lo.add(v);
-    }
-  }
-  if (model.joint) obj.joint = model.joint;
-  return obj;
-}
-
-function createVisualFromMsg(visual) {
-  if (!visual.geometry) return;
-  var vo = new THREE.Object3D(); vo.name = visual.name;
-  if (visual.pose) scene.setPose(vo, visual.pose.position, visual.pose.orientation);
-  createGeom(visual.geometry, visual.material, vo); return vo;
-}
-
-function parseMaterial(m) {
-  if (!m) return null; var a,d,s;
-  if (m.ambient) a=[m.ambient.r,m.ambient.g,m.ambient.b,m.ambient.a];
-  if (m.diffuse) d=[m.diffuse.r,m.diffuse.g,m.diffuse.b,m.diffuse.a];
-  if (m.specular) s=[m.specular.r,m.specular.g,m.specular.b,m.specular.a];
-  return {ambient:a,diffuse:d,specular:s};
-}
 
 var colladaLoader = new THREE.ColladaLoader();
 
-function createGeom(g, material, parent) {
-  var obj, mat = parseMaterial(material);
-  if (g.mesh) {
-    var uri = g.mesh.filename || "";
-    var mi = uri.indexOf('meshes/');
-    var mpath = mi >= 0 ? uri.substring(mi + 7) : uri.split('/').pop();
-    if (mpath) {
-      var isPhysicar = mpath.indexOf('physicar/') === 0 && mpath.indexOf('Base.') < 0;
-      colladaLoader.load("/sim/meshes/" + mpath, function(collada) {
-        var m = collada.scene;
-        if (g.mesh.scale) m.scale.set(g.mesh.scale.x, g.mesh.scale.y, g.mesh.scale.z);
-        if (isPhysicar) {
-          m.traverse(function(child) {
-            if (child instanceof THREE.Mesh && child.geometry) {
-              var edges = new THREE.EdgesGeometry(child.geometry, 20);
-              var c = child.material && child.material.color;
-              var lc = (c && c.r < 0.2 && c.g < 0.2 && c.b < 0.2) ? 0x555555 : 0x222222;
-              child.add(new THREE.LineSegments(edges,
-                new THREE.LineBasicMaterial({color: lc})));
-            }
-          });
-        } else {
-          // Non-physicar models: make matte (remove specular shine)
-          m.traverse(function(child) {
-            if (child instanceof THREE.Mesh && child.material) {
-              if (child.material.specular) {
-                child.material.specular.setRGB(0, 0, 0);
-              }
-              if (child.material.shininess !== undefined) {
-                child.material.shininess = 0;
-              }
-            }
-          });
-        }
-        parent.add(m);
-      }, null, function(err) {
-        var fb = scene.createBox(0.03, 0.03, 0.03);
-        parent.add(fb);
-      });
-    }
-    return;
-  }
-  if (g.box) obj = scene.createBox(g.box.size.x, g.box.size.y, g.box.size.z);
-  else if (g.cylinder) obj = scene.createCylinder(g.cylinder.radius, g.cylinder.length);
-  else if (g.sphere) obj = scene.createSphere(g.sphere.radius);
-  else if (g.plane) obj = scene.createPlane(g.plane.normal.x, g.plane.normal.y, g.plane.normal.z, g.plane.size.x, g.plane.size.y);
-  if (obj) { if (mat) scene.setMaterial(obj, mat); obj.updateMatrix(); parent.add(obj); }
+function _meshPath(uri) {
+  var mi = uri.indexOf('meshes/');
+  return mi >= 0 ? uri.substring(mi + 7) : uri.split('/').pop();
 }
+
+var gzScene = GzScene.create({
+  THREE: THREE,
+  meshUrl: function(uri) {
+    var p = _meshPath(uri);
+    return p ? "/sim/meshes/" + p : null;
+  },
+  loadMesh: function(url, onLoad, onError) {
+    colladaLoader.load(url, function(collada) { onLoad(collada.scene); }, null, onError);
+  },
+  isPhysicarMesh: function(uri) {
+    var p = _meshPath(uri);
+    return p.indexOf('physicar/') === 0 && p.indexOf('Base.') < 0;
+  }
+});
+
+function createModelFromMsg(model) { return gzScene.createModelFromMsg(model); }
 
 

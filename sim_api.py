@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright 2026 AICASTLE Inc.
 
-import re, os, json, subprocess, glob, http.server, threading, time, signal, tarfile, tempfile, shutil, io, logging
+import re, os, json, math, subprocess, glob, http.server, threading, time, signal, tarfile, tempfile, shutil, io, logging
 
 logging.basicConfig(
     level=logging.INFO,
@@ -15,7 +15,8 @@ WORLDS_DIR = os.path.join(SHARE_DIR, "worlds")
 DEFAULT_WORLD = "physicar_base.world"
 
 # Protected worlds/models that cannot be deleted or overwritten
-PROTECTED_NAMES = {"physicar_base", "physicar", "sun"}
+PROTECTED_NAMES = {"physicar_base", "physicar", "sun",
+                   "box_obstacle", "physicar_box_obstacle", "physicar_ball", "physicar_cone"}
 MAX_UPLOAD_SIZE = 50 * 1024 * 1024  # 50MB
 CHUNK_SIZE = 10 * 1024 * 1024  # 10MB chunks for Codespaces proxy limit
 UPLOAD_TIMEOUT = 600  # 10 minutes
@@ -381,6 +382,382 @@ def _get_builtin_obstacles(world):
         })
     return items
 
+# ─── Traffic lights ────────────────────────────────────────────────────
+# Phone-stand traffic light (Custom World Builder WB_LIGHT_DEFAULT 폰 시절 지오메트리):
+# 정적 스탠드 모델 + 스크린 패널 모델 2개(red/green). 패널은 non-static + gravity off
+# 라서 set_pose 서비스로 움직이고 웹 클라이언트에는 dynamic_pose/info로 반영된다.
+# 상태 표시 = 포즈 스왑: 켜진 패널은 태블릿 앞면, 꺼진 패널은 지하(-1m).
+# 신호등 출처 2가지: ① 뷰어/API로 런타임 배치, ② 월드 파일의 <link name="light"> 모델
+# (Custom World Builder가 배치 — 스탠드는 월드에 있고 스크린만 여기서 스폰).
+LIGHT_STATES = ("red", "yellow", "green")
+LIGHT_TARGETS = ("red", "green")  # 명령 가능한 목적 상태 — 노랑은 자동 경유 전용
+YELLOW_S = 3.0                    # green→red 전환 시 노랑 지속 시간
+_yellow_timers = {}               # name -> threading.Timer
+_lights = {}            # name -> {"x", "y", "yaw", "state", "builtin"}
+_lights_world = None    # world the registry belongs to
+_light_counter = 0
+
+# 스크린 패널 위치 계약 — 전부 파라메트릭 (정적 모델 없음):
+# ① 월드 정의 신호등(Custom World Builder) = 자기기술 — 모델의 `screen` visual
+#    (pose/size)을 읽어 화면 크기·기울기에 맞는 패널을 생성·스폰한다.
+# ② 런타임 배치 신호등(+ Light 버튼) = 같은 수식으로 스탠드 SDF를 생성해 스폰
+#    (기본 기기 0.18×0.32m 16:9, 15° 기울기 — 에디터 기본값과 동일).
+_SCREEN_HIDDEN_Z = -1.0     # OFF: 지하
+_LIGHT_W = 0.18             # 기본 기기 가로 (에디터 LIGHT_DEFAULT와 동일)
+_LIGHT_ASPECT = 16.0 / 9.0
+_LIGHT_TILT_DEG = 15.0
+
+def _light_geom(W=_LIGHT_W, tilt_deg=_LIGHT_TILT_DEG):
+    """파라메트릭 신호등 기하 — 에디터 Wb3dWorld.lightParts와 동일 수식.
+    반환: 스탠드 부품 좌표 + 콜리전 + 패널 계약(px/pz/pitch/w/h)."""
+    H = W * _LIGHT_ASPECT
+    tilt = math.radians(tilt_deg)
+    T, sT, lamp_l = 0.008, 0.003, 0.0015
+    inset = 0.04 * W
+    s_w, s_h = W - 2 * inset, H - 2 * inset
+    lamp_r, lamp_off = min(s_w * 0.98, s_h * 0.41) / 2, s_h / 4
+    st, ct = math.sin(tilt), math.cos(tilt)
+    ax, az = -st, ct          # 기기 세로축 (아래→위)
+    fx, fz = ct, st           # 정면 노멀
+    bcx, bcz = 0.0, ct * H / 2 + st * T / 2
+    sc_off = T / 2 + sT / 2 - 0.0005
+    scx, scz = bcx + fx * sc_off, bcz + fz * sc_off
+    lamp_f = sT / 2 - lamp_l / 2 + 0.0002  # 화면과 동일 평면
+    panel_off = sT / 2 + 0.001 + 0.0015    # 화면 앞 1mm + 패널 bg/2
+    return {
+        "W": W, "H": H, "tilt": tilt, "T": T, "sT": sT,
+        "sW": round(s_w, 5), "sH": round(s_h, 5),
+        "lamp_r": round(lamp_r, 5), "lamp_l": lamp_l,
+        "body": (round(bcx, 4), round(bcz, 4)),
+        "screen": (round(scx, 4), round(scz, 4)),
+        "lamp_red": (round(scx + ax * lamp_off + fx * lamp_f, 4), round(scz + az * lamp_off + fz * lamp_f, 4)),
+        "lamp_green": (round(scx - ax * lamp_off + fx * lamp_f, 4), round(scz - az * lamp_off + fz * lamp_f, 4)),
+        "coll": (round(st * H + ct * T, 4), round(W, 4), round(ct * H + st * T, 4)),
+        "panel": {"px": round(scx + fx * panel_off, 6), "pz": round(scz + fz * panel_off, 6),
+                  "pitch": round(-tilt, 6), "w": round(s_w, 5), "h": round(s_h, 5)},
+    }
+
+def _light_stand_sdf(g):
+    """런타임 신호등 스탠드 SDF — wb-export _wbGenerateLightModel과 동일 외형
+    (몸체/화면/램프: 빨강 꺼짐 + 초록 켜짐 발광, 콜리전 = 기울인 슬래브 AABB)."""
+    t4 = lambda v: f"{v:.4f}"
+    pitch = -g["tilt"]
+    lamp_rpy = f"0 {math.pi / 2 + pitch:.4f} 0"
+    return f"""<?xml version="1.0"?>
+<sdf version="1.7">
+<model name="runtime_light">
+  <static>true</static>
+  <link name="light">
+    <collision name="collision">
+      <pose>0 0 {t4(g["coll"][2] / 2)} 0 0 0</pose>
+      <geometry><box><size>{g["coll"][0]} {g["coll"][1]} {g["coll"][2]}</size></box></geometry>
+    </collision>
+    <visual name="body">
+      <pose>{t4(g["body"][0])} 0 {t4(g["body"][1])} 0 {pitch:.4f} 0</pose>
+      <geometry><box><size>{g["T"]} {t4(g["W"])} {t4(g["H"])}</size></box></geometry>
+      <material><ambient>0.110 0.110 0.133 1</ambient><diffuse>0.110 0.110 0.133 1</diffuse></material>
+    </visual>
+    <visual name="screen">
+      <pose>{t4(g["screen"][0])} 0 {t4(g["screen"][1])} 0 {pitch:.4f} 0</pose>
+      <geometry><box><size>{g["sT"]} {g["sW"]} {g["sH"]}</size></box></geometry>
+      <material><ambient>0 0 0 1</ambient><diffuse>0 0 0 1</diffuse></material>
+    </visual>
+    <visual name="lamp_red">
+      <pose>{t4(g["lamp_red"][0])} 0 {t4(g["lamp_red"][1])} {lamp_rpy}</pose>
+      <geometry><cylinder><radius>{g["lamp_r"]}</radius><length>{g["lamp_l"]}</length></cylinder></geometry>
+      <material><ambient>0.07 0 0 1</ambient><diffuse>0.07 0 0 1</diffuse></material>
+    </visual>
+    <visual name="lamp_green">
+      <pose>{t4(g["lamp_green"][0])} 0 {t4(g["lamp_green"][1])} {lamp_rpy}</pose>
+      <geometry><cylinder><radius>{g["lamp_r"]}</radius><length>{g["lamp_l"]}</length></cylinder></geometry>
+      <material><ambient>0 1 0 1</ambient><diffuse>0 1 0 1</diffuse><emissive>0 0.5 0 1</emissive></material>
+    </visual>
+  </link>
+</model>
+</sdf>
+"""
+
+_PANEL_SDF_DIR = "/tmp/physicar_light_panels"
+
+def _sig_pitch(sig):
+    pn = sig.get("panel") or _light_geom()["panel"]
+    return pn["pitch"]
+
+def _panel_sdf_path(name, color, pn):
+    """Write a screen-panel SDF sized to the light's screen; return its path.
+    remote-traffic-light 앱 화면과 동일: 다크 배경 + 위 빨강/아래 초록,
+    램프 지름 = min(화면 가로×0.98, 세로×0.41), 중심 = ±화면높이/4 (노랑은 중앙 단독)
+    (Non-static + gravity off — 포즈가 스트리밍되어 뷰어에 상태가 보인다)."""
+    os.makedirs(_PANEL_SDF_DIR, exist_ok=True)
+    w, h = pn["w"], pn["h"]
+    # 지름 = min(가로×0.98, 세로×0.41) — 원격 신호등 앱과 동일
+    lamp_r = round(min(w * 0.98, h * 0.41) / 2, 5)
+    off = round(h / 4, 5)
+    lamp_x = 0.001  # 화면 배경과 사실상 동일 평면 (실물 디스플레이는 평평)
+    _on = "<ambient>{c} 1</ambient><diffuse>{c} 1</diffuse><emissive>{e} 1</emissive>"
+    _off = "<ambient>{c} 1</ambient><diffuse>{c} 1</diffuse>"
+    def _lamp(nm, z, mat, x=None):
+        return f"""
+    <visual name="{nm}">
+      <pose>{lamp_x if x is None else x} 0 {z} 0 1.5708 0</pose>
+      <geometry><cylinder><radius>{lamp_r}</radius><length>0.0015</length></cylinder></geometry>
+      <material>{mat}</material>
+    </visual>"""
+    if color == "yellow":
+        # 노랑 경유 화면: 어두운 빨강/초록 위에 밝은 노랑 (0.4mm 앞 — 앱과 동일)
+        lamps = (_lamp("lamp_red", off, _off.format(c="0.07 0 0"))
+                 + _lamp("lamp_green", -off, _off.format(c="0 0.07 0"))
+                 + _lamp("lamp_yellow", 0, _on.format(c="1 0.8 0", e="0.5 0.4 0"), x=lamp_x + 0.0004))
+    elif color == "red":
+        lamps = (_lamp("lamp_red", off, _on.format(c="1 0 0", e="0.5 0 0"))
+                 + _lamp("lamp_green", -off, _off.format(c="0 0.07 0")))
+    else:  # green
+        lamps = (_lamp("lamp_red", off, _off.format(c="0.07 0 0"))
+                 + _lamp("lamp_green", -off, _on.format(c="0 1 0", e="0 0.5 0")))
+    sdf = f"""<?xml version="1.0"?>
+<sdf version="1.7">
+<model name="light_panel_{color}">
+  <static>false</static>
+  <link name="link">
+    <gravity>false</gravity>
+    <inertial>
+      <mass>0.01</mass>
+      <inertia>
+        <ixx>0.00001</ixx><ixy>0</ixy><ixz>0</ixz>
+        <iyy>0.00001</iyy><iyz>0</iyz>
+        <izz>0.00001</izz>
+      </inertia>
+    </inertial>
+    <visual name="screen_bg">
+      <geometry><box><size>0.003 {w} {h}</size></box></geometry>
+      <material><ambient>0 0 0 1</ambient><diffuse>0 0 0 1</diffuse></material>
+    </visual>{lamps}
+  </link>
+</model>
+</sdf>
+"""
+    path = os.path.join(_PANEL_SDF_DIR, f"{name}_{color}.sdf")
+    with open(path, "w") as f:
+        f.write(sdf)
+    return path
+
+def _pose_fields(x, y, z, yaw, pitch=0.0):
+    """Protobuf text for a gz.msgs.Pose (yaw ⊗ pitch)."""
+    sy, cy = math.sin(yaw / 2), math.cos(yaw / 2)
+    sp, cp = math.sin(pitch / 2), math.cos(pitch / 2)
+    # q = qz(yaw) ⊗ qy(pitch)
+    qx, qy, qz, qw = -sy * sp, cy * sp, cp * sy, cy * cp
+    return (f'position: {{x: {x:.6f}, y: {y:.6f}, z: {z:.6f}}}, '
+            f'orientation: {{x: {qx:.6f}, y: {qy:.6f}, z: {qz:.6f}, w: {qw:.6f}}}')
+
+def _screen_world_pose(sig, color):
+    """World position of a screen panel given light pose and on/off state."""
+    if sig["state"] == color:
+        pn = sig.get("panel") or _light_geom()["panel"]
+        wx = sig["x"] + math.cos(sig["yaw"]) * pn["px"]
+        wy = sig["y"] + math.sin(sig["yaw"]) * pn["px"]
+        return wx, wy, pn["pz"]
+    return sig["x"], sig["y"], _SCREEN_HIDDEN_Z
+
+def _light_set_pose(world, name, x, y, z, yaw, pitch=0.0):
+    try:
+        r = _run_gz_cmd("gz", "service", "-s", f"/world/{world}/set_pose",
+                        "--reqtype", "gz.msgs.Pose",
+                        "--reptype", "gz.msgs.Boolean",
+                        "--timeout", "3000",
+                        "--req", f'name: "{name}", {_pose_fields(x, y, z, yaw, pitch)}')
+        return r.returncode == 0 and "true" in r.stdout
+    except Exception:
+        return False
+
+def _apply_light_state(world, name, sig):
+    """Move both screen panels to match sig['state']."""
+    ok = True
+    for color in LIGHT_STATES:
+        wx, wy, wz = _screen_world_pose(sig, color)
+        ok = _light_set_pose(world, f"{name}_{color}", wx, wy, wz,
+                              sig["yaw"], _sig_pitch(sig)) and ok
+    return ok
+
+def _spawn_light_screens(world, name, sig):
+    """Spawn both screen panels for one light (stand may be runtime or world-defined)."""
+    ok = True
+    pn = sig.get("panel") or _light_geom()["panel"]
+    for color in LIGHT_STATES:
+        wx, wy, wz = _screen_world_pose(sig, color)
+        src = f'sdf_filename: "{_panel_sdf_path(name, color, pn)}"' 
+        try:
+            r = _run_gz_cmd("gz", "service", "-s", f"/world/{world}/create",
+                            "--reqtype", "gz.msgs.EntityFactory",
+                            "--reptype", "gz.msgs.Boolean",
+                            "--timeout", "5000",
+                            "--req", f'{src}, '
+                                     f'name: "{name}_{color}", '
+                                     f'pose: {{{_pose_fields(wx, wy, wz, sig["yaw"], _sig_pitch(sig))}}}')
+            if r.returncode != 0 or "true" not in r.stdout:
+                logging.error("light screen spawn failed: %s_%s", name, color)
+                ok = False
+        except Exception as e:
+            logging.error("light screen spawn error: %s_%s (%s)", name, color, e)
+            ok = False
+    return ok
+
+def _spawn_light(world, name, sig):
+    """Spawn a parametric stand + both screen panels for one runtime-placed light."""
+    ok = True
+    g = _light_geom()
+    sig["panel"] = g["panel"]  # 패널 배치 계약 — 월드 신호등과 동일 경로
+    os.makedirs(_PANEL_SDF_DIR, exist_ok=True)
+    stand_path = os.path.join(_PANEL_SDF_DIR, f"{name}_stand.sdf")
+    with open(stand_path, "w") as f:
+        f.write(_light_stand_sdf(g))
+    try:
+        r = _run_gz_cmd("gz", "service", "-s", f"/world/{world}/create",
+                        "--reqtype", "gz.msgs.EntityFactory",
+                        "--reptype", "gz.msgs.Boolean",
+                        "--timeout", "5000",
+                        "--req", f'sdf_filename: "{stand_path}", '
+                                 f'name: "{name}", '
+                                 f'pose: {{{_pose_fields(sig["x"], sig["y"], 0.0, sig["yaw"])}}}')
+        if r.returncode != 0 or "true" not in r.stdout:
+            logging.error("light spawn failed: %s", name)
+            ok = False
+    except Exception as e:
+        logging.error("light spawn error: %s (%s)", name, e)
+        ok = False
+    return _spawn_light_screens(world, name, sig) and ok
+
+def _set_light_target(world, name, target):
+    """목적 상태 적용. green→red 는 노랑(YELLOW_S초) 자동 경유, 경유 중엔 명령 잠금."""
+    with _lock:
+        sig = _lights.get(name)
+        if sig is None:
+            return False, None, "light not found"
+        if sig["state"] == "yellow":
+            return False, sig, "yellow transition in progress"
+        if sig["state"] == target:
+            return True, sig, None
+        via_yellow = (sig["state"] == "green" and target == "red")
+        sig = dict(sig, state="yellow" if via_yellow else target)
+        _lights[name] = sig
+    if not _apply_light_state(world, name, sig):
+        return False, sig, "state change failed"
+    if via_yellow:
+        t = threading.Timer(YELLOW_S, _finish_yellow, args=(world, name, target))
+        t.daemon = True
+        _yellow_timers[name] = t
+        t.start()
+    return True, sig, None
+
+def _finish_yellow(world, name, target):
+    with _lock:
+        _yellow_timers.pop(name, None)
+        sig = _lights.get(name)
+        if sig is None or sig["state"] != "yellow":
+            return
+        sig = dict(sig, state=target)
+        _lights[name] = sig
+    _apply_light_state(world, name, sig)
+    logging.info("light %s: yellow -> %s", name, target)
+
+def _scan_world_lights(world):
+    """Register world-defined traffic lights (link 마커 — Custom World Builder 배치).
+
+    스탠드는 월드 파일에 이미 있으므로 스크린 패널만 스폰하면 된다.
+    기본 상태는 green (DeepRacer 주행 기본과 동일). 같은 월드 respawn 시
+    기존 등록 상태를 유지한다.
+    """
+    import xml.etree.ElementTree as ET
+    path = os.path.join(WORLDS_DIR, f"{world}.world")
+    if not os.path.isfile(path):
+        return
+    try:
+        root = ET.parse(path).getroot()
+    except Exception:
+        return
+    world_el = root.find("world")
+    if world_el is None:
+        return
+    for m in world_el.findall("model"):
+        name = m.get("name") or ""
+        # 신호등 판별: link 이름이 'light' (Custom World Builder 계약 마커 —
+        # 모델명은 사용자 이름이라 이름으로는 구분 불가. 'signal'은 구 마커)
+        sig_link = None
+        for lk in m.findall("link"):
+            if lk.get("name") in ("light", "signal"):  # 'signal' = 구 마커 (기존 월드 호환)
+                sig_link = lk
+                break
+        if sig_link is None:
+            continue
+        x = y = yaw = 0.0
+        pose_el = m.find("pose")
+        if pose_el is not None and pose_el.text:
+            parts = pose_el.text.split()
+            if len(parts) >= 6:
+                x, y, yaw = float(parts[0]), float(parts[1]), float(parts[5])
+        # 자기기술 계약: `screen` visual의 pose(기울기 포함)/size에서 패널 배치 유도
+        panel = None
+        for v in sig_link.findall("visual"):
+            if v.get("name") != "screen":
+                continue
+            try:
+                vp = [float(t) for t in (v.findtext("pose") or "0 0 0 0 0 0").split()]
+                sz = [float(t) for t in (v.findtext(".//box/size") or "0.003 0.069 0.147").split()]
+                tilt = -vp[4]                      # screen pose pitch = -tilt
+                foff = sz[0] / 2 + 0.001 + 0.0015  # 화면 앞 1mm + 패널 bg 두께/2
+                panel = {
+                    "px": round(vp[0] + math.cos(tilt) * foff, 6),
+                    "pz": round(vp[2] + math.sin(tilt) * foff, 6),
+                    "pitch": round(vp[4], 6),
+                    "w": round(sz[1], 5), "h": round(sz[2], 5),
+                }
+            except Exception:
+                panel = None
+            break
+        with _lock:
+            existing = _lights.get(name)
+            prev_state = existing["state"] if existing else "green"
+            if prev_state == "yellow":
+                prev_state = "red"  # 경유 중 리로드 — 목적 상태로 정리
+            sig = {
+                "x": round(x, 6), "y": round(y, 6), "yaw": round(yaw, 6),
+                "state": prev_state,
+                "builtin": True,
+            }
+            if panel:
+                sig["panel"] = panel
+            _lights[name] = sig
+        logging.info("world light registered: %s", name)
+        _spawn_light_screens(world, name, sig)
+
+def _remove_light(world, name):
+    """Remove pole/housing + lamps of one light from the world."""
+    for ename in (name, f"{name}_red", f"{name}_green"):
+        try:
+            _run_gz_cmd("gz", "service", "-s", f"/world/{world}/remove",
+                        "--reqtype", "gz.msgs.Entity",
+                        "--reptype", "gz.msgs.Boolean",
+                        "--timeout", "3000",
+                        "--req", f'name: "{ename}", type: MODEL')
+        except Exception:
+            pass
+
+def _restore_lights(world):
+    """Re-spawn runtime-placed lights after a world (re)start.
+
+    builtin(월드 정의) 신호등은 _scan_world_lights가 처리한다.
+    노랑 경유 중 재시작이면 타이머가 소실되므로 목적 상태(red)로 정리.
+    """
+    with _lock:
+        for _n, _s in list(_lights.items()):
+            if _s.get("state") == "yellow":
+                _lights[_n] = dict(_s, state="red")
+    with _lock:
+        sigs = {n: s for n, s in _lights.items() if not s.get("builtin")}
+    for name, sig in sigs.items():
+        logging.info("restoring light %s", name)
+        _spawn_light(world, name, sig)
+
 # ─── Track bounds ──────────────────────────────────────────────────────
 _track_bounds_cache = {}
 
@@ -420,7 +797,7 @@ def _get_track_bounds(world_name):
 
 def start_sim(world_file):
     """Start simulation for given world file. Kills existing sim first."""
-    global _sim_proc, _current_world, _switching, _switching_since
+    global _sim_proc, _current_world, _switching, _switching_since, _lights_world
     with _lock:
         _switching = True
         _switching_since = time.time()
@@ -433,6 +810,12 @@ def start_sim(world_file):
                 _switching = False
             return False
         wname = _get_world_name(world_file)
+
+        # Traffic lights survive a respawn (same world) but not a world switch
+        with _lock:
+            if _lights_world != wname:
+                _lights.clear()
+                _lights_world = wname
 
         # Kill existing
         _kill_all_gz()
@@ -497,6 +880,8 @@ def start_sim(world_file):
                     if proc.poll() is not None:
                         logging.error("gz sim died after spawn (exit %s)", proc.returncode)
                         return
+                    _scan_world_lights(wname)
+                    _restore_lights(wname)
                     logging.info("physicar spawned, starting gz-launch")
                     _start_launch()
                 finally:
@@ -672,11 +1057,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._json(200, {"world": world, "waypoints": waypoints})
             else:
                 self._json(404, {"error": "route not available"})
+        elif self.path == "/traffic_lights":
+            with _lock:
+                world = _current_world
+                items = [{"name": n, **s} for n, s in sorted(_lights.items())]
+            self._json(200, {"world": world, "lights": items})
         else:
             self._json(404, {"error": "not found"})
 
     def do_POST(self):
-        global _sim_proc, _current_world, _launch_proc, _fail_count
+        global _sim_proc, _current_world, _launch_proc, _fail_count, _light_counter
         if self.path == "/respawn":
             with _lock:
                 world = _current_world
@@ -863,10 +1253,92 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 _launch_proc = None
                 _current_world = None
             self._json(200, {"ok": True})
+        elif self.path == "/traffic_lights":
+            with _lock:
+                world = _current_world
+                switching = _switching
+            if not world or switching:
+                self._json(409, {"error": "world not ready"})
+                return
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length)) if length else {}
+            try:
+                x = float(body.get("x"))
+                y = float(body.get("y"))
+                yaw = float(body.get("yaw", 0.0))
+            except (TypeError, ValueError):
+                self._json(400, {"error": "x and y must be numbers"})
+                return
+            if not (-100 <= x <= 100 and -100 <= y <= 100):
+                self._json(400, {"error": "position out of range"})
+                return
+            state = body.get("state", "green")
+            if state not in LIGHT_STATES:
+                self._json(400, {"error": f"state must be one of {list(LIGHT_STATES)}"})
+                return
+            with _lock:
+                if len(_lights) >= 20:
+                    self._json(409, {"error": "too many lights (max 20)"})
+                    return
+                _light_counter += 1
+                name = f"light_{_light_counter}"
+                while name in _lights:
+                    _light_counter += 1
+                    name = f"light_{_light_counter}"
+                sig = {"x": round(x, 6), "y": round(y, 6),
+                       "yaw": round(yaw, 6), "state": state}
+                _lights[name] = sig
+            if not _spawn_light(world, name, sig):
+                with _lock:
+                    _lights.pop(name, None)
+                _remove_light(world, name)
+                self._json(500, {"error": "spawn failed"})
+                return
+            logging.info("light placed: %s at (%.2f, %.2f)", name, x, y)
+            self._json(200, {"ok": True, "light": {"name": name, **sig}})
+        elif re.match(r'^/traffic_lights/[\w]+$', self.path):
+            name = self.path.rsplit("/", 1)[1]
+            with _lock:
+                world = _current_world
+                sig = _lights.get(name)
+            if not world or sig is None:
+                self._json(404, {"error": "light not found"})
+                return
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length)) if length else {}
+            state = body.get("state")
+            if state not in LIGHT_TARGETS:
+                self._json(400, {"error": f"state must be one of {list(LIGHT_TARGETS)}"})
+                return
+            ok, sig, err = _set_light_target(world, name, state)
+            if err:
+                self._json(409 if err == "yellow transition in progress" else 500, {"error": err})
+                return
+            self._json(200, {"ok": True, "light": {"name": name, **sig}})
         else:
             self._json(404, {"error": "not found"})
 
     def do_DELETE(self):
+        m = re.match(r'^/traffic_lights/([\w]+)$', self.path)
+        if m:
+            name = m.group(1)
+            with _lock:
+                world = _current_world
+                sig = _lights.get(name)
+                if sig and sig.get("builtin"):
+                    sig = "builtin"
+                else:
+                    sig = _lights.pop(name, None)
+            if sig == "builtin":
+                self._json(403, {"error": "world-defined light cannot be deleted"})
+                return
+            if not world or sig is None:
+                self._json(404, {"error": "light not found"})
+                return
+            _remove_light(world, name)
+            logging.info("light removed: %s", name)
+            self._json(200, {"ok": True, "deleted": name})
+            return
         m = re.match(r'^/worlds/([\w]+)$', self.path)
         if m:
             world_name = m.group(1)

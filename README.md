@@ -27,6 +27,17 @@ An HTTP API for track management and vehicle state queries is served under the `
 | `GET` | `/sim/api/worlds` | World list (includes the current world) |
 | `POST` | `/sim/api/respawn` | Reload the world to reset all objects to their start state |
 | `POST` | `/sim/api/switch` | Switch world (`{"world": "<name>.world"}`) |
+| `GET` | `/sim/api/traffic_lights` | List placed traffic lights and their states |
+| `POST` | `/sim/api/traffic_lights` | Place a traffic light (`{"x": 1.0, "y": 2.0, "yaw": 0.0, "state": "red"}`) |
+| `POST` | `/sim/api/traffic_lights/<name>` | Change a signal state (`{"state": "red"}` or `{"state": "green"}`) |
+| `DELETE` | `/sim/api/traffic_lights/<name>` | Remove a traffic light |
+
+Traffic lights can also be placed and controlled from the web viewer (🚦 Signal menu).
+They survive a respawn of the same world and are cleared on world switch.
+
+Custom World Builder tracks may include `signal_*` models (tablet-stand signals).
+These are detected on world load, appear in the same list/API with `"builtin": true`,
+and can be controlled but not deleted. Default state is `green`.
 
 ## License
 

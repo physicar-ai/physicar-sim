@@ -8,6 +8,7 @@
   <script src="assets/lib/eventemitter2.min.js"></script>
   <script src="assets/lib/gz.js"></script>
   <script src="assets/lib/gz3d.js"></script>
+  <script src="assets/js/gz-scene.js"></script>
   <script src="assets/js/gzweb.js"></script>
 </head>
 <body onload="init()">
@@ -20,6 +21,10 @@
       <div id="dropdown-menu" class="dropdown-menu"></div>
     </div>
     <button id="import-btn" onclick="openUpload()" title="Import World"><span class="import-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></span><span class="bar-label"> Import</span></button>
+    <div id="light-wrap" class="dropdown">
+      <button id="light-btn" onclick="toggleLightMenu()" title="Traffic Lights"><span class="light-icon">&#x1f6a6;</span><span class="bar-label"> Light</span></button>
+      <div id="light-menu" class="dropdown-menu"></div>
+    </div>
   </div>
   <div id="settings">
     <button id="settings-btn" onclick="toggleSettings()" title="Settings"><span class="bar-label">Settings </span><span class="settings-icon">&#x2699;</span></button>

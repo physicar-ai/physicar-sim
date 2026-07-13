@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <COLLADA xmlns="http://www.collada.org/2005/11/COLLADASchema" version="1.4.1">
   <asset>
-    <created>2026-06-16T05:02:15.285Z</created>
-    <modified>2026-06-16T05:02:15.285Z</modified>
+    <created>2026-07-11T09:02:37.466Z</created>
+    <modified>2026-07-11T09:02:37.466Z</modified>
     <unit name="meter" meter="1"/>
     <up_axis>Z_UP</up_axis>
   </asset>
@@ -29,7 +29,7 @@
     </effect>
   </library_effects>
   <library_images>
-    <image id="field_png" name="field_png"><init_from>textures/field.png</init_from></image>
+    <image id="field_png" name="field_png"><init_from>../world_builder/textures/field_carpet.png</init_from></image>
   </library_images>
   <library_materials>
     <material id="field_mat-material" name="field_mat"><instance_effect url="#field_mat-effect"/></material>

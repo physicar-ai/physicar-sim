@@ -1,25 +1,19 @@
 <?xml version="1.0" encoding="utf-8"?>
 <COLLADA xmlns="http://www.collada.org/2005/11/COLLADASchema" version="1.4.1">
   <asset>
-    <created>2026-06-16T05:02:15.285Z</created>
-    <modified>2026-06-16T05:02:15.285Z</modified>
+    <created>2026-07-11T09:02:37.466Z</created>
+    <modified>2026-07-11T09:02:37.466Z</modified>
     <unit name="meter" meter="1"/>
     <up_axis>Z_UP</up_axis>
   </asset>
   <library_effects>
     <effect id="wall_material-effect">
       <profile_COMMON>
-        <newparam sid="wall_png-surface">
-          <surface type="2D"><init_from>wall_png</init_from></surface>
-        </newparam>
-        <newparam sid="wall_png-sampler">
-          <sampler2D><source>wall_png-surface</source></sampler2D>
-        </newparam>
         <technique sid="common">
           <phong>
             <emission><color sid="emission">0 0 0 1</color></emission>
-            <ambient><color sid="ambient">1 1 1 1</color></ambient>
-            <diffuse><texture texture="wall_png-sampler" texcoord="wall-texcoords"/></diffuse>
+            <ambient><color sid="ambient">0.141 0.275 0.318 1</color></ambient>
+            <diffuse><color sid="diffuse">0.141 0.275 0.318 1</color></diffuse>
             <specular><color sid="specular">0 0 0 1</color></specular>
             <shininess><float sid="shininess">0</float></shininess>
             <index_of_refraction><float sid="index_of_refraction">1</float></index_of_refraction>
@@ -28,9 +22,6 @@
       </profile_COMMON>
     </effect>
   </library_effects>
-  <library_images>
-    <image id="wall_png" name="wall_png"><init_from>textures/wall.png</init_from></image>
-  </library_images>
   <library_materials>
     <material id="wall_material-material" name="wall_material"><instance_effect url="#wall_material-effect"/></material>
   </library_materials>

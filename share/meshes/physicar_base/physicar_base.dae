@@ -2,11 +2,11 @@
 <COLLADA xmlns="http://www.collada.org/2005/11/COLLADASchema" version="1.4.1">
   <asset>
     <contributor>
-      <author>PhysiCar Track Builder</author>
-      <authoring_tool>PhysiCar Track Builder Web App</authoring_tool>
+      <author>Physicar World Builder</author>
+      <authoring_tool>Physicar World Builder Web App</authoring_tool>
     </contributor>
-    <created>2026-06-16T05:02:15.957Z</created>
-    <modified>2026-06-16T05:02:15.957Z</modified>
+    <created>2026-07-11T09:02:44.223Z</created>
+    <modified>2026-07-11T09:02:44.223Z</modified>
     <unit name="meter" meter="1"/>
     <up_axis>Z_UP</up_axis>
   </asset>
@@ -139,11 +139,11 @@
     </effect>
   </library_effects>
   <library_images>
-    <image id="centerLine_png" name="centerLine_png"><init_from>textures/centerLine.png</init_from></image>
-    <image id="field_png" name="field_png"><init_from>textures/field.png</init_from></image>
-    <image id="outerLine_png" name="outerLine_png"><init_from>textures/outerLine.png</init_from></image>
-    <image id="road_png" name="road_png"><init_from>textures/road.png</init_from></image>
-    <image id="startline_png" name="startline_png"><init_from>textures/startline.png</init_from></image>
+    <image id="centerLine_png" name="centerLine_png"><init_from>../world_builder/textures/centerLine.png</init_from></image>
+    <image id="field_png" name="field_png"><init_from>../world_builder/textures/field_carpet.png</init_from></image>
+    <image id="outerLine_png" name="outerLine_png"><init_from>../world_builder/textures/outerLine.png</init_from></image>
+    <image id="road_png" name="road_png"><init_from>../world_builder/textures/road.png</init_from></image>
+    <image id="startline_png" name="startline_png"><init_from>../world_builder/textures/startline.png</init_from></image>
     <image id="image_2_png" name="image_2_png"><init_from>textures/image_0.png</init_from></image>
     <image id="image_1_png" name="image_1_png"><init_from>textures/image_1.png</init_from></image>
     <image id="image_0_png" name="image_0_png"><init_from>textures/image_2.png</init_from></image>
