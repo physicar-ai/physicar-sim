@@ -2,6 +2,11 @@
 // Gazebo Web Viewer - Main JavaScript
 // =====================================================================
 
+// 앱(/app) 임베드 시 상단 툴바(Respawn/월드/Import)는 래퍼 패널 헤더가 대신 제공
+try {
+  if (window.parent !== window) { document.documentElement.classList.add("embedded"); }
+} catch (e) { document.documentElement.classList.add("embedded"); }
+
 var wsProtocol = (location.protocol === "https:") ? "wss://" : "ws://";
 var wsUrl;
 if (location.pathname.startsWith("/sim")) {
@@ -168,7 +173,7 @@ function connect() {
     document.getElementById("respawn-btn").disabled = false;
     // Sync world list on every (re)connect
     loadWorlds();
-    _refreshLights();
+    _refreshLights(_scheduleLightPoll);
     _loadGridBounds();
   });
   
@@ -649,7 +654,6 @@ var gzInteract = null;
 var _lightsCache = {};   // name -> {state, builtin, x, y, yaw}
 var _poseHold = {};      // name -> ms timestamp — 커밋 직후 스트림 포즈 반영 억제
 var _selLight = null;
-var _yellowTimer = null;
 var _manipHintShown = false;
 var _vehicleHintShown = false;
 
@@ -659,10 +663,51 @@ function _refreshLights(cb) {
     .then(function(d) {
       _lightsCache = {};
       (d.lights || []).forEach(function(l) { _lightsCache[l.name] = l; });
+      _applyLightVisuals();
       if (_selLight) { _renderLightPanel(); }
       if (cb) { cb(); }
     })
     .catch(function() { if (cb) { cb(); } });
+}
+
+// ── 램프 색 계약 (sim_api._LAMP_COLORS와 쌍) — 상태 변경은 재질 색 교체일 뿐,
+//    램프 메시는 월드 로드 때 이미 씬에 있으므로 즉시 반영된다 ──
+var LAMP_COLORS = {
+  red:    { lamp_red: ['#ff0000', '#800000'], lamp_yellow: ['#121200', null], lamp_green: ['#001200', null] },
+  yellow: { lamp_red: ['#120000', null], lamp_yellow: ['#ffcc00', '#806600'], lamp_green: ['#001200', null] },
+  green:  { lamp_red: ['#120000', null], lamp_yellow: ['#121200', null], lamp_green: ['#00ff00', '#008000'] }
+};
+
+function _applyLightVisuals() {
+  Object.keys(_lightsCache).forEach(function(name) {
+    var model = scene.getByName(name);
+    var colors = LAMP_COLORS[(_lightsCache[name] || {}).state];
+    if (!model || !colors) { return; }
+    model.traverse(function(o) {
+      var c = colors[o.name];
+      if (!c) { return; }
+      o.traverse(function(m) {
+        if (m.material && m.material.color) {
+          m.material.color.set(c[0]);
+          if (m.material.emissive) { m.material.emissive.set(c[1] || '#000000'); }
+        }
+      });
+    });
+  });
+}
+
+// 외부(로봇 코드/API) 상태 변경 반영용 저주파 폴링 — 노랑 경유 중엔 촘촘히.
+// 신호등 없는 월드에서는 5초마다 존재 확인만 한다.
+var _lightPollTimer = null;
+function _scheduleLightPoll() {
+  if (_lightPollTimer) { clearTimeout(_lightPollTimer); }
+  var names = Object.keys(_lightsCache);
+  var delay = 5000;
+  if (connected && names.length > 0) {
+    var anyYellow = names.some(function(n) { return _lightsCache[n].state === 'yellow'; });
+    delay = anyYellow ? 700 : 2500;
+  }
+  _lightPollTimer = setTimeout(function() { _refreshLights(_scheduleLightPoll); }, delay);
 }
 
 // 픽킹 대상 판별 — 최상위 모델의 link(자식) 이름 마커로 종류 결정
@@ -674,12 +719,6 @@ function _resolveTarget(top, leaf) {
       name === currentWorld) {
     return null;
   }
-  // 신호등 스크린 패널(런타임 스폰) 클릭 → 본체 신호등으로 승격
-  var pm = name.match(/^(.+)_(red|yellow|green)$/);
-  if (pm && _lightsCache[pm[1]]) {
-    var stand = scene.getByName(pm[1]);
-    return stand ? _lightTarget(stand, pm[1]) : null;
-  }
   var marker = null;
   for (var i = 0; i < top.children.length; i++) {
     var n = top.children[i].name;
@@ -687,20 +726,10 @@ function _resolveTarget(top, leaf) {
   }
   if (marker === 'wall') { return null; }        // 벽은 이동 불가 (WB와 동일)
   if (marker === 'light' || marker === 'signal' || _lightsCache[name]) {
-    return _lightTarget(top, name);
+    return { obj: top, name: name, kind: 'light' }; // 단일 강체 — 램프는 링크 visual
   }
   if (name === 'physicar') { return { obj: top, name: name, kind: 'vehicle' }; }
   return { obj: top, name: name, kind: 'object' };
-}
-
-// 신호등 = 스탠드 + 스크린 패널 3장(런타임 모델)이 강체로 함께 움직인다
-function _lightTarget(stand, name) {
-  var att = [];
-  ['red', 'yellow', 'green'].forEach(function(c) {
-    var panel = scene.getByName(name + '_' + c);
-    if (panel) { att.push(panel); }
-  });
-  return { obj: stand, name: name, kind: 'light', attachments: att };
 }
 
 function _onSelect(sel) {
@@ -729,9 +758,10 @@ function _commitPose(sel, pose) {
     url = "/sim/api/pose";
     body = { x: pose.x, y: pose.y, yaw: pose.yaw };
   } else {
+    // z는 보내지 않는다 — 서버가 지면 안착 높이를 계산 (넘어진 물체를
+    // 드래그하면 세워지므로, 누운 상태의 z를 보내면 뜨거나 파묻힌다)
     url = "/sim/api/models/" + sel.name + "/pose";
     body = { x: pose.x, y: pose.y, yaw: pose.yaw };
-    if (sel.kind !== 'light') { body.z = pose.z; }
   }
   fetch(url, {
     method: "POST",
@@ -768,13 +798,12 @@ function _showLightPanel(name) {
   _selLight = name;
   _renderLightPanel();
   document.getElementById("light-panel").classList.add("show");
-  _refreshLights(_pollYellow);
+  _refreshLights(_scheduleLightPoll);
 }
 
 function _hideLightPanel() {
   _selLight = null;
   document.getElementById("light-panel").classList.remove("show");
-  if (_yellowTimer) { clearTimeout(_yellowTimer); _yellowTimer = null; }
 }
 
 function _renderLightPanel() {
@@ -789,15 +818,6 @@ function _renderLightPanel() {
   document.getElementById("lp-green").disabled = (st === "yellow" || st === "green");
 }
 
-// 노랑 경유(3초) 동안만 짧게 폴링해 완료 상태를 패널에 반영
-function _pollYellow() {
-  if (_yellowTimer) { clearTimeout(_yellowTimer); _yellowTimer = null; }
-  var l = _lightsCache[_selLight];
-  if (l && l.state === "yellow") {
-    _yellowTimer = setTimeout(function() { _refreshLights(_pollYellow); }, 700);
-  }
-}
-
 function setLightState(name, state) {
   if (!name) { return; }
   fetch("/sim/api/traffic_lights/" + name, {
@@ -808,7 +828,7 @@ function setLightState(name, state) {
   .then(function(r) { return r.json(); })
   .then(function(d) {
     if (!d.ok) { _showToast(d.error || "State change failed"); }
-    _refreshLights(_pollYellow);
+    _refreshLights(_scheduleLightPoll);
   })
   .catch(function() { _showToast("State change failed"); });
 }

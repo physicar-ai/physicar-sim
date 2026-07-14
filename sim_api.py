@@ -401,111 +401,60 @@ LIGHT_STATES = ("red", "yellow", "green")
 LIGHT_TARGETS = ("red", "green")  # 명령 가능한 목적 상태 — 노랑은 자동 경유 전용
 YELLOW_S = 3.0                    # green→red 전환 시 노랑 지속 시간
 _yellow_timers = {}               # name -> threading.Timer
-_lights = {}            # name -> {"x", "y", "yaw", "state", "panel"} — 월드 정의 신호등만
+_lights = {}            # name -> {"x", "y", "yaw", "state"} — 월드 정의 신호등만
 _lights_world = None    # world the registry belongs to
 
-# 스크린 패널 위치 계약 — 전부 파라메트릭 (정적 모델 없음):
-# 월드 정의 신호등(Custom World Builder) = 자기기술 — 모델의 `screen` visual
-# (pose/size)을 읽어 화면 크기·기울기에 맞는 패널을 생성·스폰한다.
-# (런타임 신호등 배치는 2026-07 제거 — 월드에 정의된 신호등만 인식·제어한다.)
-_SCREEN_HIDDEN_Z = -1.0     # OFF: 지하
-_LIGHT_W = 0.18             # 기본 기기 가로 (에디터 LIGHT_DEFAULT와 동일)
-_LIGHT_ASPECT = 16.0 / 9.0
-_LIGHT_TILT_DEG = 15.0
+# 상태 표시 계약 — visual_config 색 변경 (스크린 패널 모델 폐지, 2026-07-14):
+# 신호등은 월드 모델 단일 강체. 스탠드 link "light"의 lamp_red/lamp_yellow/lamp_green
+# visual 색을 /world/<w>/visual_config 서비스로 갈아끼운다 → 차량 카메라(서버 렌더)에
+# 반영. 웹 뷰어는 같은 상태를 REST로 읽어 three.js 재질을 직접 칠한다 (gzweb.js).
+# 구 월드(lamp_yellow 없음): 해당 visual_config만 실패 — 노랑 경유가 "양쪽 소등"으로
+# 보이는 폴백이 된다 (3초 뒤 빨강 점등).
+_LAMP_COLORS = {
+    # state -> {visual: (ambient/diffuse rgb, emissive rgb|None)}
+    "red": {
+        "lamp_red": ("1 0 0", "0.5 0 0"),
+        "lamp_yellow": ("0.07 0.07 0", None),
+        "lamp_green": ("0 0.07 0", None),
+    },
+    "yellow": {
+        "lamp_red": ("0.07 0 0", None),
+        "lamp_yellow": ("1 0.8 0", "0.5 0.4 0"),
+        "lamp_green": ("0 0.07 0", None),
+    },
+    "green": {
+        "lamp_red": ("0.07 0 0", None),
+        "lamp_yellow": ("0.07 0.07 0", None),
+        "lamp_green": ("0 1 0", "0 0.5 0"),
+    },
+}
 
-def _light_geom(W=_LIGHT_W, tilt_deg=_LIGHT_TILT_DEG):
-    """파라메트릭 신호등 기하 — 에디터 Wb3dWorld.lightParts와 동일 수식.
-    반환: 스탠드 부품 좌표 + 콜리전 + 패널 계약(px/pz/pitch/w/h)."""
-    H = W * _LIGHT_ASPECT
-    tilt = math.radians(tilt_deg)
-    T, sT, lamp_l = 0.008, 0.003, 0.0015
-    inset = 0.04 * W
-    s_w, s_h = W - 2 * inset, H - 2 * inset
-    lamp_r, lamp_off = min(s_w * 0.98, s_h * 0.41) / 2, s_h / 4
-    st, ct = math.sin(tilt), math.cos(tilt)
-    ax, az = -st, ct          # 기기 세로축 (아래→위)
-    fx, fz = ct, st           # 정면 노멀
-    bcx, bcz = 0.0, ct * H / 2 + st * T / 2
-    sc_off = T / 2 + sT / 2 - 0.0005
-    scx, scz = bcx + fx * sc_off, bcz + fz * sc_off
-    lamp_f = sT / 2 - lamp_l / 2 + 0.0002  # 화면과 동일 평면
-    panel_off = sT / 2 + 0.001 + 0.0015    # 화면 앞 1mm + 패널 bg/2
-    return {
-        "W": W, "H": H, "tilt": tilt, "T": T, "sT": sT,
-        "sW": round(s_w, 5), "sH": round(s_h, 5),
-        "lamp_r": round(lamp_r, 5), "lamp_l": lamp_l,
-        "body": (round(bcx, 4), round(bcz, 4)),
-        "screen": (round(scx, 4), round(scz, 4)),
-        "lamp_red": (round(scx + ax * lamp_off + fx * lamp_f, 4), round(scz + az * lamp_off + fz * lamp_f, 4)),
-        "lamp_green": (round(scx - ax * lamp_off + fx * lamp_f, 4), round(scz - az * lamp_off + fz * lamp_f, 4)),
-        "coll": (round(st * H + ct * T, 4), round(W, 4), round(ct * H + st * T, 4)),
-        "panel": {"px": round(scx + fx * panel_off, 6), "pz": round(scz + fz * panel_off, 6),
-                  "pitch": round(-tilt, 6), "w": round(s_w, 5), "h": round(s_h, 5)},
-    }
+def _set_visual_material(world, scoped_name, rgb, emissive):
+    """visual_config 유저 커맨드로 visual 재질 색 변경 (ogre2 서버 렌더 반영)."""
+    r_, g_, b_ = rgb.split()
+    mat = (f'ambient: {{r: {r_}, g: {g_}, b: {b_}, a: 1}}, '
+           f'diffuse: {{r: {r_}, g: {g_}, b: {b_}, a: 1}}')
+    er, eg, eb = (emissive or "0 0 0").split()
+    mat += f', emissive: {{r: {er}, g: {eg}, b: {eb}, a: 1}}'
+    try:
+        r = _run_gz_cmd("gz", "service", "-s", f"/world/{world}/visual_config",
+                        "--reqtype", "gz.msgs.Visual",
+                        "--reptype", "gz.msgs.Boolean",
+                        "--timeout", "3000",
+                        "--req", f'name: "{scoped_name}", material: {{{mat}}}')
+        return r.returncode == 0 and "true" in r.stdout
+    except Exception:
+        return False
 
-_PANEL_SDF_DIR = "/tmp/physicar_light_panels"
-
-def _sig_pitch(sig):
-    pn = sig.get("panel") or _light_geom()["panel"]
-    return pn["pitch"]
-
-def _panel_sdf_path(name, color, pn):
-    """Write a screen-panel SDF sized to the light's screen; return its path.
-    remote-traffic-light 앱 화면과 동일: 다크 배경 + 위 빨강/아래 초록,
-    램프 지름 = min(화면 가로×0.98, 세로×0.41), 중심 = ±화면높이/4 (노랑은 중앙 단독)
-    (Non-static + gravity off — 포즈가 스트리밍되어 뷰어에 상태가 보인다)."""
-    os.makedirs(_PANEL_SDF_DIR, exist_ok=True)
-    w, h = pn["w"], pn["h"]
-    # 지름 = min(가로×0.98, 세로×0.41) — 원격 신호등 앱과 동일
-    lamp_r = round(min(w * 0.98, h * 0.41) / 2, 5)
-    off = round(h / 4, 5)
-    lamp_x = 0.001  # 화면 배경과 사실상 동일 평면 (실물 디스플레이는 평평)
-    _on = "<ambient>{c} 1</ambient><diffuse>{c} 1</diffuse><emissive>{e} 1</emissive>"
-    _off = "<ambient>{c} 1</ambient><diffuse>{c} 1</diffuse>"
-    def _lamp(nm, z, mat, x=None):
-        return f"""
-    <visual name="{nm}">
-      <pose>{lamp_x if x is None else x} 0 {z} 0 1.5708 0</pose>
-      <geometry><cylinder><radius>{lamp_r}</radius><length>0.0015</length></cylinder></geometry>
-      <material>{mat}</material>
-    </visual>"""
-    if color == "yellow":
-        # 노랑 경유 화면: 어두운 빨강/초록 위에 밝은 노랑 (0.4mm 앞 — 앱과 동일)
-        lamps = (_lamp("lamp_red", off, _off.format(c="0.07 0 0"))
-                 + _lamp("lamp_green", -off, _off.format(c="0 0.07 0"))
-                 + _lamp("lamp_yellow", 0, _on.format(c="1 0.8 0", e="0.5 0.4 0"), x=lamp_x + 0.0004))
-    elif color == "red":
-        lamps = (_lamp("lamp_red", off, _on.format(c="1 0 0", e="0.5 0 0"))
-                 + _lamp("lamp_green", -off, _off.format(c="0 0.07 0")))
-    else:  # green
-        lamps = (_lamp("lamp_red", off, _off.format(c="0.07 0 0"))
-                 + _lamp("lamp_green", -off, _on.format(c="0 1 0", e="0 0.5 0")))
-    sdf = f"""<?xml version="1.0"?>
-<sdf version="1.7">
-<model name="light_panel_{color}">
-  <static>false</static>
-  <link name="link">
-    <gravity>false</gravity>
-    <inertial>
-      <mass>0.01</mass>
-      <inertia>
-        <ixx>0.00001</ixx><ixy>0</ixy><ixz>0</ixz>
-        <iyy>0.00001</iyy><iyz>0</iyz>
-        <izz>0.00001</izz>
-      </inertia>
-    </inertial>
-    <visual name="screen_bg">
-      <geometry><box><size>0.003 {w} {h}</size></box></geometry>
-      <material><ambient>0 0 0 1</ambient><diffuse>0 0 0 1</diffuse></material>
-    </visual>{lamps}
-  </link>
-</model>
-</sdf>
-"""
-    path = os.path.join(_PANEL_SDF_DIR, f"{name}_{color}.sdf")
-    with open(path, "w") as f:
-        f.write(sdf)
-    return path
+def _apply_light_state(world, name, sig):
+    """램프 3개 visual 색을 상태에 맞게 변경. lamp_yellow 부재(구 월드)는 무해 실패."""
+    colors = _LAMP_COLORS[sig["state"]]
+    ok = True
+    for lamp, (rgb, emissive) in colors.items():
+        applied = _set_visual_material(world, f"{name}::light::{lamp}", rgb, emissive)
+        if lamp != "lamp_yellow":  # 구 월드에 lamp_yellow 없음 — 실패 허용
+            ok = applied and ok
+    return ok
 
 def _pose_fields(x, y, z, yaw, pitch=0.0):
     """Protobuf text for a gz.msgs.Pose (yaw ⊗ pitch)."""
@@ -515,15 +464,6 @@ def _pose_fields(x, y, z, yaw, pitch=0.0):
     qx, qy, qz, qw = -sy * sp, cy * sp, cp * sy, cy * cp
     return (f'position: {{x: {x:.6f}, y: {y:.6f}, z: {z:.6f}}}, '
             f'orientation: {{x: {qx:.6f}, y: {qy:.6f}, z: {qz:.6f}, w: {qw:.6f}}}')
-
-def _screen_world_pose(sig, color):
-    """World position of a screen panel given light pose and on/off state."""
-    if sig["state"] == color:
-        pn = sig.get("panel") or _light_geom()["panel"]
-        wx = sig["x"] + math.cos(sig["yaw"]) * pn["px"]
-        wy = sig["y"] + math.sin(sig["yaw"]) * pn["px"]
-        return wx, wy, pn["pz"]
-    return sig["x"], sig["y"], _SCREEN_HIDDEN_Z
 
 def _set_entity_pose(world, name, x, y, z, yaw, pitch=0.0):
     try:
@@ -536,41 +476,9 @@ def _set_entity_pose(world, name, x, y, z, yaw, pitch=0.0):
     except Exception:
         return False
 
-def _apply_light_state(world, name, sig):
-    """Move both screen panels to match sig['state']."""
-    ok = True
-    for color in LIGHT_STATES:
-        wx, wy, wz = _screen_world_pose(sig, color)
-        ok = _set_entity_pose(world, f"{name}_{color}", wx, wy, wz,
-                              sig["yaw"], _sig_pitch(sig)) and ok
-    return ok
-
-def _spawn_light_screens(world, name, sig):
-    """Spawn both screen panels for one light (stand may be runtime or world-defined)."""
-    ok = True
-    pn = sig.get("panel") or _light_geom()["panel"]
-    for color in LIGHT_STATES:
-        wx, wy, wz = _screen_world_pose(sig, color)
-        src = f'sdf_filename: "{_panel_sdf_path(name, color, pn)}"' 
-        try:
-            r = _run_gz_cmd("gz", "service", "-s", f"/world/{world}/create",
-                            "--reqtype", "gz.msgs.EntityFactory",
-                            "--reptype", "gz.msgs.Boolean",
-                            "--timeout", "5000",
-                            "--req", f'{src}, '
-                                     f'name: "{name}_{color}", '
-                                     f'pose: {{{_pose_fields(wx, wy, wz, sig["yaw"], _sig_pitch(sig))}}}')
-            if r.returncode != 0 or "true" not in r.stdout:
-                logging.error("light screen spawn failed: %s_%s", name, color)
-                ok = False
-        except Exception as e:
-            logging.error("light screen spawn error: %s_%s (%s)", name, color, e)
-            ok = False
-    return ok
-
 def _move_light(world, name, x, y, yaw):
-    """신호등 텔레포트 — 스탠드(월드 모델)와 스크린 패널을 함께 옮기고 레지스트리 갱신.
-    노랑 경유 중에도 이동은 허용(상태 기계와 무관 — 패널은 sig 상태 그대로 재배치)."""
+    """신호등 텔레포트 — 단일 강체라 스탠드 set_pose 하나로 끝 (z=0·yaw-only = 재기립).
+    램프는 링크의 visual이므로 함께 움직인다. 노랑 경유 중에도 이동 허용."""
     with _lock:
         sig = _lights.get(name)
         if sig is None:
@@ -578,7 +486,6 @@ def _move_light(world, name, x, y, yaw):
         sig = dict(sig, x=round(x, 6), y=round(y, 6), yaw=round(yaw, 6))
         _lights[name] = sig
     ok = _set_entity_pose(world, name, x, y, 0.0, yaw)
-    ok = _apply_light_state(world, name, sig) and ok
     return ok, sig, (None if ok else "pose change failed")
 
 def _set_light_target(world, name, target):
@@ -650,25 +557,6 @@ def _scan_world_lights(world):
             parts = pose_el.text.split()
             if len(parts) >= 6:
                 x, y, yaw = float(parts[0]), float(parts[1]), float(parts[5])
-        # 자기기술 계약: `screen` visual의 pose(기울기 포함)/size에서 패널 배치 유도
-        panel = None
-        for v in sig_link.findall("visual"):
-            if v.get("name") != "screen":
-                continue
-            try:
-                vp = [float(t) for t in (v.findtext("pose") or "0 0 0 0 0 0").split()]
-                sz = [float(t) for t in (v.findtext(".//box/size") or "0.003 0.069 0.147").split()]
-                tilt = -vp[4]                      # screen pose pitch = -tilt
-                foff = sz[0] / 2 + 0.001 + 0.0015  # 화면 앞 1mm + 패널 bg 두께/2
-                panel = {
-                    "px": round(vp[0] + math.cos(tilt) * foff, 6),
-                    "pz": round(vp[2] + math.sin(tilt) * foff, 6),
-                    "pitch": round(vp[4], 6),
-                    "w": round(sz[1], 5), "h": round(sz[2], 5),
-                }
-            except Exception:
-                panel = None
-            break
         with _lock:
             existing = _lights.get(name)
             prev_state = existing["state"] if existing else "green"
@@ -679,12 +567,12 @@ def _scan_world_lights(world):
                 "state": prev_state,
                 "builtin": True,
             }
-            if panel:
-                sig["panel"] = panel
             _lights[name] = sig
         seen.add(name)
         logging.info("world light registered: %s", name)
-        _spawn_light_screens(world, name, sig)
+        # 익스포트 SDF는 초록 점등으로 구워져 있음 — 보존 상태가 다르면 색 복원
+        if sig["state"] != "green":
+            _apply_light_state(world, name, sig)
     # 이전 월드 파일 버전의 잔재 정리 (같은 이름 월드가 교체 업로드된 경우)
     with _lock:
         for stale in [n for n in _lights if n not in seen]:
@@ -1229,13 +1117,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._json(403, {"error": "use POST /pose for the vehicle" if name == "physicar"
                                  else f"{name} cannot be moved"})
                 return
-            # 신호등 스크린 패널은 내부 구현물 — 본체 신호등을 옮겨야 한다
-            pm = re.match(r'^(.+)_(red|yellow|green)$', name)
-            if pm:
-                with _lock:
-                    if pm.group(1) in _lights:
-                        self._json(403, {"error": f"screen panel — move the light '{pm.group(1)}' instead"})
-                        return
             items = _get_builtin_obstacles(world) or []
             item = next((i for i in items if i["name"] == name), None)
             if item is None and not is_light:
@@ -1250,8 +1131,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
             try:
                 x = float(body["x"]) if body.get("x") is not None else cur["x"]
                 y = float(body["y"]) if body.get("y") is not None else cur["y"]
-                z = float(body["z"]) if body.get("z") is not None else cur["z"]
                 yaw = float(body["yaw"]) if body.get("yaw") is not None else cur["yaw"]
+                if body.get("z") is not None:
+                    z = float(body["z"])
+                elif item is not None and not item.get("static") and item.get("size"):
+                    # z 생략 + 비정적: 지면 안착 높이 — 포즈는 항상 yaw-only로 세워지므로
+                    # 넘어진 물체(누운 z)를 그대로 쓰면 파묻히거나 뜬다. 콜리전 절반 높이로.
+                    z = item["size"]["z"] / 2.0 + 0.001
+                else:
+                    z = cur["z"]
             except (TypeError, ValueError):
                 self._json(400, {"error": "x, y, z, yaw must be numbers"})
                 return
