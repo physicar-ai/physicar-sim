@@ -169,6 +169,7 @@ function connect() {
     // Sync world list on every (re)connect
     loadWorlds();
     _refreshLights();
+    _loadGridBounds();
   });
   
   gz.on("close", function() {
@@ -369,8 +370,11 @@ function init() {
       '<p style="font-size:13px;color:#666">Could not create WebGL context.<br>Try closing other 3D tabs or refresh the page.</p></div></div>';
     return;
   }
-  scene.grid.visible = true;
-  
+  // GZ3D 기본 그리드는 원점 중심(전 사분면) — 월드는 1사분면(0,0)~(W,H) 기준이라
+  // 사용하지 않는다 (World Builder와 동일한 1사분면 그리드를 대신 그림).
+  scene.grid.visible = false;
+  scene.grid.raycast = function() {};
+
   // Remove any default lights added by GZ3D.Scene
   var toRemove = [];
   scene.scene.traverse(function(obj) {
@@ -378,9 +382,6 @@ function init() {
   });
   toRemove.forEach(function(l) { scene.scene.remove(l); });
   console.log('[Init] Removed', toRemove.length, 'default lights');
-  
-  // Fix grid z position (gz3d.js sets 0.05, we want 0)
-  scene.grid.position.z = 0;
   
   // Lights will be added from scene message in handleScene()
   
@@ -984,8 +985,47 @@ function _applySettings() {
   togglePose(poEl.checked);
 }
 
+// ── 1사분면 그리드: 월드는 (0,0)~(W,H)에만 존재 — 음수 사분면 그리지 않음
+// (World Builder rebuildGrid와 동일 스타일: 1m 간격, 회색, z 0.0015)
+// 크기는 현재 트랙의 bounds(/sim/api/track_bounds)를 미터 단위로 올림해 맞춘다.
+var _quadGrid = null;
+var _gridOn = false;
+var _gridW = 10, _gridH = 10;
+
+function _rebuildQuadGrid() {
+  if (_quadGrid) { scene.scene.remove(_quadGrid); }
+  _quadGrid = new THREE.Group();
+  var g = new THREE.Geometry();
+  for (var x = 0; x <= _gridW + 1e-6; x += 1.0) {
+    g.vertices.push(new THREE.Vector3(x, 0, 0), new THREE.Vector3(x, _gridH, 0));
+  }
+  for (var y = 0; y <= _gridH + 1e-6; y += 1.0) {
+    g.vertices.push(new THREE.Vector3(0, y, 0), new THREE.Vector3(_gridW, y, 0));
+  }
+  var l = new THREE.LineSegments(g, new THREE.LineBasicMaterial({ color: 0x8a8a8a, transparent: true, opacity: 0.6 }));
+  l.raycast = function() {}; // r86 Line threshold(1m)가 픽킹을 가로채지 않게
+  _quadGrid.add(l);
+  _quadGrid.position.z = 0.0015;
+  _quadGrid.visible = _gridOn;
+  scene.scene.add(_quadGrid);
+}
+
+function _loadGridBounds() {
+  fetch("/sim/api/track_bounds")
+    .then(function(r) { return r.json(); })
+    .then(function(b) {
+      if (typeof b.maxX !== "number" || typeof b.maxY !== "number") { return; }
+      _gridW = Math.max(1, Math.min(50, Math.ceil(b.maxX)));
+      _gridH = Math.max(1, Math.min(50, Math.ceil(b.maxY)));
+      _rebuildQuadGrid();
+    })
+    .catch(function() { /* bounds 없음 — 기본 크기 유지 */ });
+}
+
 function toggleGrid(on) {
-  scene.grid.visible = on;
+  _gridOn = on;
+  if (!_quadGrid) { _rebuildQuadGrid(); }
+  _quadGrid.visible = on;
 }
 
 // =====================================================================
