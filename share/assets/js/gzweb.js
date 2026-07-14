@@ -492,26 +492,21 @@ function closeUpload() {
   document.getElementById("file-input").value = "";
 }
 
-// Drag & drop
-var dropZone = null;
+// Drag & drop — 모달 없이도 화면 어디에나 .tar.gz를 떨어뜨리면 업로드
 window.addEventListener("load", function() {
-  dropZone = document.getElementById("drop-zone");
-  var area = document.getElementById("upload-area");
   ["dragenter", "dragover"].forEach(function(e) {
-    area.addEventListener(e, function(ev) { ev.preventDefault(); area.classList.add("dragover"); });
+    window.addEventListener(e, function(ev) { ev.preventDefault(); }, false);
   });
-  ["dragleave", "drop"].forEach(function(e) {
-    area.addEventListener(e, function(ev) { ev.preventDefault(); area.classList.remove("dragover"); });
-  });
-  area.addEventListener("drop", function(ev) {
-    var files = ev.dataTransfer.files;
-    if (files.length > 0) handleFile(files[0]);
-  });
+  window.addEventListener("drop", function(ev) {
+    ev.preventDefault();
+    var files = ev.dataTransfer && ev.dataTransfer.files;
+    if (files && files.length > 0) handleFile(files[0]);
+  }, false);
 });
 
 function handleFile(file) {
   if (!file) return;
-  openUpload();
+  openUpload(); // 진행 표시 모달 — 파일이 정해진 뒤에만 뜬다
   var statusEl = document.getElementById("upload-status");
   if (!file.name.endsWith(".tar.gz")) {
     statusEl.textContent = "File must be .tar.gz";
