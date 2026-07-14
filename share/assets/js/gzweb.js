@@ -654,8 +654,6 @@ var gzInteract = null;
 var _lightsCache = {};   // name -> {state, builtin, x, y, yaw}
 var _poseHold = {};      // name -> ms timestamp — 커밋 직후 스트림 포즈 반영 억제
 var _selLight = null;
-var _manipHintShown = false;
-var _vehicleHintShown = false;
 
 function _refreshLights(cb) {
   fetch("/sim/api/traffic_lights")
@@ -673,9 +671,10 @@ function _refreshLights(cb) {
 // ── 램프 색 계약 (sim_api._LAMP_COLORS와 쌍) — 상태 변경은 재질 색 교체일 뿐,
 //    램프 메시는 월드 로드 때 이미 씬에 있으므로 즉시 반영된다 ──
 var LAMP_COLORS = {
-  red:    { lamp_red: ['#ff0000', '#800000'], lamp_yellow: ['#121200', null], lamp_green: ['#001200', null] },
-  yellow: { lamp_red: ['#120000', null], lamp_yellow: ['#ffcc00', '#806600'], lamp_green: ['#001200', null] },
-  green:  { lamp_red: ['#120000', null], lamp_yellow: ['#121200', null], lamp_green: ['#00ff00', '#008000'] }
+  // 노랑은 서버가 오버레이 모델(<name>_yellow, 포즈 스트리밍)로 표시 — 클라 칠하기 없음
+  red:    { lamp_red: ['#ff0000', '#800000'], lamp_green: ['#001200', null] },
+  yellow: { lamp_red: ['#120000', null], lamp_green: ['#001200', null] },
+  green:  { lamp_red: ['#120000', null], lamp_green: ['#00ff00', '#008000'] }
 };
 
 function _applyLightVisuals() {
@@ -719,6 +718,12 @@ function _resolveTarget(top, leaf) {
       name === currentWorld) {
     return null;
   }
+  // 노랑 오버레이(런타임 모델) 클릭 → 본체 신호등으로 승격
+  var ym = name.match(/^(.+)_yellow$/);
+  if (ym && _lightsCache[ym[1]]) {
+    var stand = scene.getByName(ym[1]);
+    return stand ? { obj: stand, name: ym[1], kind: 'light' } : null;
+  }
   var marker = null;
   for (var i = 0; i < top.children.length; i++) {
     var n = top.children[i].name;
@@ -737,10 +742,6 @@ function _onSelect(sel) {
     _showLightPanel(sel.name);
   } else {
     _hideLightPanel();
-  }
-  if (!_manipHintShown) {
-    _manipHintShown = true;
-    _showToast("Drag to move \u00b7 blue dot to rotate \u00b7 Esc to deselect", 4000);
   }
 }
 
@@ -773,9 +774,6 @@ function _commitPose(sel, pose) {
     release(); // 서버 적용 완료 — 다음 스트림 프레임부터 실제 포즈 반영
     if (!d.ok) {
       _showToast(d.error || "Move failed");
-    } else if (sel.kind === 'vehicle' && !_vehicleHintShown) {
-      _vehicleHintShown = true;
-      _showToast("Vehicle teleported \u2014 odometry may drift. Use Respawn for a clean reset.", 5000);
     }
   })
   .catch(function() { release(); _showToast("Move failed"); });
@@ -808,18 +806,15 @@ function _hideLightPanel() {
 
 function _renderLightPanel() {
   if (!_selLight) { return; }
-  var st = (_lightsCache[_selLight] || {}).state || "...";
+  var st = (_lightsCache[_selLight] || {}).state || "";
   document.getElementById("lp-name").textContent = _selLight;
-  var pill = document.getElementById("lp-pill");
-  pill.className = "light-pill light-" + st;
-  pill.textContent = st.toUpperCase();
-  // 노랑 경유 중엔 잠금 (sim_api도 409로 거부한다)
-  document.getElementById("lp-red").disabled = (st === "yellow" || st === "red");
-  document.getElementById("lp-green").disabled = (st === "yellow" || st === "green");
+  document.getElementById("lp-lights").className = "lp-lights " + st;
 }
 
 function setLightState(name, state) {
   if (!name) { return; }
+  var cur = (_lightsCache[name] || {}).state;
+  if (cur === state || cur === "yellow") { return; } // 켜진 불/노랑 경유 중 클릭 무시
   fetch("/sim/api/traffic_lights/" + name, {
     method: "POST",
     headers: {"Content-Type": "application/json"},

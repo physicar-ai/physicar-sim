@@ -35,22 +35,19 @@
   </div>
   <div id="pose-panel"></div>
   <div id="light-panel">
-    <div class="lp-head"><span class="lp-icon">&#x1f6a6;</span><span id="lp-name"></span>
+    <div class="lp-head"><span id="lp-name"></span>
       <span class="lp-close" onclick="gzInteract && gzInteract.deselect()">&times;</span></div>
-    <div class="lp-state">State <span id="lp-pill" class="light-pill">...</span></div>
-    <div class="lp-btns">
-      <button id="lp-red" onclick="setLightState(_selLight, 'red')">RED</button>
-      <button id="lp-green" onclick="setLightState(_selLight, 'green')">GREEN</button>
+    <div class="lp-lights" id="lp-lights">
+      <div class="lp-lamp lp-red" onclick="setLightState(_selLight, 'red')"></div>
+      <div class="lp-lamp lp-yellow"></div>
+      <div class="lp-lamp lp-green" onclick="setLightState(_selLight, 'green')"></div>
     </div>
-    <div class="lp-hint">Drag to move &middot; blue dot to rotate</div>
   </div>
   <div id="container"></div>
   <div id="upload-overlay" onclick="closeUpload()"></div>
   <!-- 진행 표시 전용 (파일 선택은 Import 버튼이 곧장 연다 — 드래그&드롭은 화면 전체) -->
   <div id="upload-area">
     <span class="close" onclick="closeUpload()">&times;</span>
-    <p style="font-size: 16px; margin-bottom: 8px;">Import Custom Track</p>
-    <p style="color: #aaa; font-size: 12px; margin-bottom: 12px;">To create your own world, use the World Builder at <a href="https://physicar.ai/resources/world-builder" target="_blank" style="color: #6cb2ff;">https://physicar.ai/resources/world-builder</a></p>
     <input type="file" id="file-input" accept=".tar.gz,.gz" onchange="handleFile(this.files[0])" style="display:none">
     <div id="upload-status"></div>
   </div>
