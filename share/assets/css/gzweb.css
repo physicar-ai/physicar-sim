@@ -102,7 +102,8 @@ body { background: #1a1a2e; color: #eee; font-family: sans-serif; overflow: hidd
    원격 신호등 앱과 동일 문법: 꺼진 불 클릭 = 전환, 노랑은 중앙 겹침(z2). */
 #light-panel { display: none; position: fixed; top: 50%; right: calc(var(--u)*0.6); transform: translateY(-50%);
                z-index: 20; background: rgba(20,20,40,0.92); border: 1px solid #555;
-               border-radius: calc(var(--u)*0.6); padding: calc(var(--u)*0.5); }
+               border-radius: calc(var(--u)*0.6); padding: calc(var(--u)*0.5);
+               max-height: calc(100vh - 16px); }
 #light-panel.show { display: block; }
 #light-panel .lp-head { display: flex; align-items: center; gap: calc(var(--u)*0.3);
                         font-size: calc(var(--u)*0.8); margin-bottom: calc(var(--u)*0.4); color: #aaa; }
@@ -110,7 +111,10 @@ body { background: #1a1a2e; color: #eee; font-family: sans-serif; overflow: hidd
                         max-width: calc(var(--u)*6); }
 #light-panel .lp-close { color: #888; cursor: pointer; font-size: calc(var(--u)*1.2); line-height: 1; }
 #light-panel .lp-close:hover { color: #fff; }
-.lp-lights { position: relative; width: calc(var(--u)*6.5); height: calc(var(--u)*13);
+.lp-lights { position: relative; aspect-ratio: 1 / 2; width: auto;
+             /* 임베드 iframe이 낮아도 잘리지 않게 — 뷰포트에 맞춰 축소 (램프는 % 배치라 비례 축소) */
+             height: min(calc(var(--u)*13), calc(100vh - 80px));
+             min-height: calc(var(--u)*6);
              background: #000; border-radius: calc(var(--u)*0.7); }
 .lp-lamp { position: absolute; left: 50%; transform: translateX(-50%);
            height: 41%; aspect-ratio: 1; border-radius: 50%; }

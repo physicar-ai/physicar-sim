@@ -22,6 +22,10 @@ var GzInteract = (function() {
     // opts.onSelect(sel) / opts.onDeselect() / opts.onCommit(sel, {x,y,z,yaw})
     // opts.onDrag(sel)  — 라이브 드래그 중 (선택)
 
+    // GZ3D 자체 클릭 선택(월드 정렬 박스 + 매니퓰레이터)은 이 모듈과 이중 표시된다 —
+    // 선택 UI는 이 모듈이 전담하므로 런타임에서 무력화 (vendor 파일 무수정 원칙)
+    scene.selectEntity = function() {};
+
     var sel = null;          // {obj, name, kind, attachments}
     var bodyDrag = null;     // {dx, dy, base:[{obj,px,py,quat}], moved}
     var ringDrag = null;     // {yawOffset, startYaw, base:[...], moved}
@@ -61,6 +65,58 @@ var GzInteract = (function() {
 
     function quatToYaw(q) {
       return Math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z));
+    }
+
+    // ── 선택 박스 — WB _showSelBox 이식: 회전·스케일 정규화 후 로컬 AABB를 측정해
+    //    오브젝트의 "자식"으로 부착 → 회전/이동을 자연히 동반한다.
+    //    (gz3d showBoundingBox는 박스를 월드 정렬로 역회전시켜 회전 시 어긋난다)
+    var selBox = null;
+    function removeSelBox() {
+      if (selBox && selBox.parent) { selBox.parent.remove(selBox); }
+      selBox = null;
+    }
+    function showSelBox(obj) {
+      removeSelBox();
+      if (!obj) { return; }
+      var q = obj.quaternion.clone();
+      var sc0 = obj.scale.clone();
+      obj.quaternion.set(0, 0, 0, 1);
+      obj.scale.set(1, 1, 1);
+      obj.updateMatrixWorld(true);
+      var bb = new THREE.Box3().setFromObject(obj);
+      obj.quaternion.copy(q);
+      obj.scale.copy(sc0);
+      obj.updateMatrixWorld(true);
+      if (!isFinite(bb.min.x) || !isFinite(bb.max.x)) { return; }
+      var mn = [bb.min.x - obj.position.x, bb.min.y - obj.position.y, bb.min.z - obj.position.z];
+      var mx = [bb.max.x - obj.position.x, bb.max.y - obj.position.y, bb.max.z - obj.position.z];
+      var C = [[mn[0],mn[1],mn[2]],[mx[0],mn[1],mn[2]],[mx[0],mx[1],mn[2]],[mn[0],mx[1],mn[2]],
+               [mn[0],mn[1],mx[2]],[mx[0],mn[1],mx[2]],[mx[0],mx[1],mx[2]],[mn[0],mx[1],mx[2]]];
+      var E = [[0,1],[1,2],[2,3],[3,0],[4,5],[5,6],[6,7],[7,4],[0,4],[1,5],[2,6],[3,7]];
+      var g = new THREE.Geometry();
+      E.forEach(function(pr) {
+        g.vertices.push(new THREE.Vector3(C[pr[0]][0], C[pr[0]][1], C[pr[0]][2]),
+                        new THREE.Vector3(C[pr[1]][0], C[pr[1]][1], C[pr[1]][2]));
+      });
+      // 2패스: 보이는 모서리는 밝게, 가려진 모서리는 흐리게 (WB와 동일)
+      selBox = new THREE.Object3D();
+      var front = new THREE.LineSegments(g, new THREE.LineBasicMaterial({
+        color: 0xffffff, transparent: true, opacity: 0.95, depthWrite: false }));
+      var hidden = new THREE.LineSegments(g, new THREE.LineBasicMaterial({
+        color: 0xffffff, transparent: true, opacity: 0.16, depthWrite: false,
+        depthFunc: THREE.GreaterDepth }));
+      hidden.renderOrder = 995;
+      front.renderOrder = 996;
+      front.raycast = function() {};
+      hidden.raycast = function() {};
+      selBox.add(hidden);
+      selBox.add(front);
+      selBox.name = 'GZ_SEL_BOX';
+      selBox.raycast = function() {};
+      var n = 0;
+      obj.traverse(function() { n++; });
+      selBox.userData.n = n; // 비동기 메시 로드 감지용 (update에서 재측정)
+      obj.add(selBox);
     }
 
     function _rect() { return scene.renderer.domElement.getBoundingClientRect(); }
@@ -126,14 +182,14 @@ var GzInteract = (function() {
       if (sel && sel.obj === target.obj) { return; }
       deselect(true);
       sel = target;
-      scene.showBoundingBox(target.obj);
+      showSelBox(target.obj);
       syncRing();
       if (opts.onSelect) { opts.onSelect(sel); }
     }
 
     function deselect(silent) {
       if (!sel) { return; }
-      scene.hideBoundingBox();
+      removeSelBox();
       rotRing.visible = false;
       sel = null;
       if (!silent && opts.onDeselect) { opts.onDeselect(); }
@@ -202,9 +258,6 @@ var GzInteract = (function() {
       if (!s) { return; }
       var obj = s.obj;
       var yaw = quatToYaw(obj.quaternion);
-      // 선택 박스는 월드 정렬 스냅샷 — 회전 후엔 재계산
-      scene.hideBoundingBox();
-      scene.showBoundingBox(obj);
       syncRing();
       if (opts.onCommit) {
         opts.onCommit(s, { x: obj.position.x, y: obj.position.y, z: obj.position.z, yaw: yaw });
@@ -321,7 +374,14 @@ var GzInteract = (function() {
         select(t);
         return true;
       },
-      update: syncRing, // 매 프레임 — 카메라 이동 시 핸들 위치/크기 유지
+      update: function() {
+        syncRing();
+        if (sel && selBox) { // 비동기 메시 로드 감지 — 자식 수 변화 시 재측정
+          var n = 0;
+          sel.obj.traverse(function() { n++; });
+          if (n !== selBox.userData.n) { showSelBox(sel.obj); }
+        }
+      },
     };
   }
 
