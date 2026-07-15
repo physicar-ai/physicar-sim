@@ -113,10 +113,10 @@ var GzInteract = (function() {
       selBox.add(front);
       selBox.name = 'GZ_SEL_BOX';
       selBox.raycast = function() {};
-      var n = 0;
-      obj.traverse(function() { n++; });
-      selBox.userData.n = n; // 비동기 메시 로드 감지용 (update에서 재측정)
       obj.add(selBox);
+      var n = 0;
+      obj.traverse(function() { n++; }); // 부착 후 총수(박스 포함) — update 비교 기준 일치
+      selBox.userData.n = n; // 비동기 메시 로드 감지용 (자식 수 변화 시 재측정)
     }
 
     function _rect() { return scene.renderer.domElement.getBoundingClientRect(); }
