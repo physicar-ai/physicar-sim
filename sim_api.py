@@ -13,9 +13,11 @@ SIM_DIR = os.path.dirname(os.path.abspath(__file__))
 SHARE_DIR = os.path.join(SIM_DIR, "share")
 WORLDS_DIR = os.path.join(SHARE_DIR, "worlds")
 DEFAULT_WORLD = "physicar_base.world"
+# Last successfully started world, persisted across restarts/reboots
+LAST_WORLD_FILE = "/opt/physicar/userdata/last_world"
 
 # Protected worlds/models that cannot be deleted or overwritten
-PROTECTED_NAMES = {"physicar_base", "physicar", "sun",
+PROTECTED_NAMES = {"physicar_base", "physicar", "sun", "physicar_sky",
                    "box_obstacle", "physicar_box_obstacle", "physicar_ball", "physicar_cone"}
 MAX_UPLOAD_SIZE = 50 * 1024 * 1024  # 50MB
 CHUNK_SIZE = 10 * 1024 * 1024  # 10MB chunks for Codespaces proxy limit
@@ -41,6 +43,24 @@ def _cleanup_stale_uploads():
 def _validate_world_name(name):
     """Validate world name: starts with letter, alphanumeric + underscores."""
     return bool(re.match(r'^[A-Za-z][A-Za-z0-9_]{0,63}$', name))
+
+def _load_boot_world():
+    """World to boot with: the last used one if it still exists, else the default."""
+    try:
+        with open(LAST_WORLD_FILE) as fp:
+            name = fp.read().strip()
+        if _validate_world_name(name) and os.path.isfile(os.path.join(WORLDS_DIR, name + ".world")):
+            return name + ".world"
+    except Exception:
+        pass
+    return DEFAULT_WORLD
+
+def _save_last_world(world_file):
+    try:
+        with open(LAST_WORLD_FILE, "w") as fp:
+            fp.write(os.path.splitext(world_file)[0])
+    except Exception as e:
+        logging.warning("could not persist last world: %s", e)
 
 def _validate_tar(tar_path):
     """Validate uploaded tar.gz. Discovers world name from worlds/*.world.
@@ -132,6 +152,48 @@ def _validate_tar(tar_path):
     except tarfile.TarError as e:
         return False, f"invalid tar.gz: {e}", None
 
+SKY_DOME_INCLUDE = """  <include>
+    <uri>model://models/physicar_sky</uri>
+    <pose>0 0 0 0 0 0</pose>
+    <name>physicar_sky</name>
+  </include>
+"""
+
+PHYSICS_BLOCK = """  <physics name="default_physics" type="ode">
+    <max_step_size>0.005</max_step_size>
+    <real_time_update_rate>200</real_time_update_rate>
+  </physics>
+"""
+
+def _ensure_sky_dome(world_file):
+    """Normalize a world file in place (idempotent).
+
+    - Gradient sky dome: the robot camera is rendered by headless ogre2,
+      which draws no <sky/> — without the dome model the camera sees only
+      the flat <background> color while the viewer shows its gradient sky.
+    - Physics block: worlds ported from AWS carry none and would run at the
+      Gazebo default 1000 Hz — 5x the physics CPU of physicar worlds.
+    """
+    try:
+        path = os.path.join(WORLDS_DIR, world_file)
+        with open(path) as fp:
+            src = fp.read()
+        if "</world>" not in src:
+            return
+        changed = False
+        if "models/physicar_sky" not in src:
+            src = src.replace("</world>", SKY_DOME_INCLUDE + "</world>", 1)
+            changed = True
+        if "<physics" not in src:
+            src = src.replace("</world>", PHYSICS_BLOCK + "</world>", 1)
+            changed = True
+        if changed:
+            with open(path, "w") as fp:
+                fp.write(src)
+            logging.info("world defaults ensured for %s", world_file)
+    except Exception as e:
+        logging.warning("world normalization failed for %s: %s", world_file, e)
+
 def _extract_world(tar_path, world_name):
     """Extract validated tar.gz into share/ directory."""
     with tarfile.open(tar_path, 'r:gz') as tf:
@@ -142,6 +204,7 @@ def _extract_world(tar_path, world_name):
         for member in tf.getmembers():
             if member.name in exact or any(member.name.startswith(p) for p in prefixes):
                 tf.extract(member, SHARE_DIR)
+    _ensure_sky_dome(f"{world_name}.world")
 
 def _delete_world_files(world_name):
     """Delete all files associated with a world."""
@@ -804,6 +867,7 @@ def start_sim(world_file):
         with _lock:
             _sim_proc = proc
             _current_world = os.path.splitext(world_file)[0]
+        _save_last_world(world_file)
 
         # Post-start: wait for sim ready → unpause → spawn → start websocket
         if wname:
@@ -913,7 +977,7 @@ def _watchdog():
                             "gz sim (PID %d) alive but gz-transport unresponsive, restarting",
                             proc.pid
                         )
-                        wfile = (world or "physicar_base") + ".world"
+                        wfile = (world + ".world") if world else _load_boot_world()
                         if os.path.isfile(os.path.join(WORLDS_DIR, wfile)):
                             start_sim(wfile)
                         continue
@@ -930,7 +994,7 @@ def _watchdog():
                 continue  # stopped — wait for manual /switch
 
             _fail_count += 1
-            wfile = (world or "physicar_base") + ".world"
+            wfile = (world + ".world") if world else _load_boot_world()
             if os.path.isfile(os.path.join(WORLDS_DIR, wfile)):
                 logging.warning("gz sim not running, restarting %s (%d/%d)", wfile, _fail_count, _MAX_FAILS)
                 start_sim(wfile)
@@ -1365,6 +1429,9 @@ if __name__ == "__main__":
         except Exception:
             pass
     _kill_all_gz()
+    # Boot the world immediately instead of waiting for the watchdog's first
+    # 5s tick — cuts several seconds off time-to-first-camera-frame.
+    threading.Thread(target=start_sim, args=(_load_boot_world(),), daemon=True).start()
     threading.Thread(target=_watchdog, daemon=True).start()
     http.server.HTTPServer.allow_reuse_address = True
     server = http.server.HTTPServer(("127.0.0.1", 9003), Handler)

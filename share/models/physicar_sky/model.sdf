@@ -1,0 +1,14 @@
+<?xml version="1.0" ?>
+<sdf version="1.6">
+  <model name="physicar_sky">
+    <static>true</static>
+    <link name="link">
+      <visual name="dome">
+        <cast_shadows>false</cast_shadows>
+        <geometry>
+          <mesh><uri>model://meshes/physicar_sky/sky_dome.dae</uri></mesh>
+        </geometry>
+      </visual>
+    </link>
+  </model>
+</sdf>

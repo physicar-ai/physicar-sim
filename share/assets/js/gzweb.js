@@ -294,6 +294,9 @@ function connect() {
       
       for (var i = 0; i < _sceneInfo.model.length; ++i) {
         var m = _sceneInfo.model[i];
+        // The in-world sky dome exists for the robot camera only; the viewer
+        // renders its own shader gradient dome (same colors).
+        if (m.name === 'physicar_sky') continue;
         if (!knownModels[m.name]) {
           knownModels[m.name] = true;
           var modelObj = createModelFromMsg(m);
@@ -330,11 +333,12 @@ function connect() {
           for (var j = 0; j < msg.pose.length; ++j) {
             var p = msg.pose[j];
             var e = scene.getByName(p.name);
-            if (e && e !== scene.modelManipulator.object && e.parent !== scene.modelManipulator.object
-                && !(gzInteract && gzInteract.isManipulating(p.name))
-                && !(_poseHold[p.name] && _poseHold[p.name] > Date.now())) {
-              scene.updatePose(e, p.position, p.orientation);
-            } else if (!e && !knownModels[p.name] && p.name !== currentWorld) {
+            if (e) {
+              // Buffer the timestamped pose; _applyPoseLerp() plays the
+              // stream back _POSE_DELAY_MS in the past with linear
+              // interpolation between packets (constant velocity, no jumps).
+              _pushPoseSample(p.name, p.position || {}, p.orientation || {});
+            } else if (!knownModels[p.name] && p.name !== currentWorld) {
               needRefresh = true;
             }
           }
@@ -653,6 +657,59 @@ document.addEventListener("click", function(e) {
 var gzInteract = null;
 var _lightsCache = {};   // name -> {state, builtin, x, y, yaw}
 var _poseHold = {};      // name -> ms timestamp — 커밋 직후 스트림 포즈 반영 억제
+var _poseLerp = {};      // name -> ring of timestamped stream poses (playout buffer)
+var _POSE_DELAY_MS = 100;  // render this far in the past, linearly interpolating
+                           // between the two bracketing packets. Constant-velocity
+                           // playback masks the packet rate completely; exponential
+                           // chasing (tried first) ripples at the packet frequency.
+
+function _pushPoseSample(name, pos, ori) {
+  var q = new THREE.Quaternion(ori.x || 0, ori.y || 0, ori.z || 0,
+                               ori.w !== undefined ? ori.w : 1);
+  var s = { t: performance.now(),
+            x: pos.x || 0, y: pos.y || 0, z: pos.z || 0, q: q };
+  var buf = _poseLerp[name];
+  if (!buf) { _poseLerp[name] = [s]; return; }
+  var last = buf[buf.length - 1];
+  var dx = s.x - last.x, dy = s.y - last.y, dz = s.z - last.z;
+  if (dx * dx + dy * dy + dz * dz > 4) buf.length = 0;  // teleport: snap, don't glide
+  buf.push(s);
+  if (buf.length > 12) buf.shift();
+}
+
+function _applyPoseLerp() {
+  var rt = performance.now() - _POSE_DELAY_MS;
+  for (var name in _poseLerp) {
+    var buf = _poseLerp[name];
+    if (!buf.length) { delete _poseLerp[name]; continue; }
+    var e = scene.getByName(name);
+    if (!e) { delete _poseLerp[name]; continue; }
+    if (e === scene.modelManipulator.object || e.parent === scene.modelManipulator.object) continue;
+    if (gzInteract && gzInteract.isManipulating(name)) continue;
+    if (_poseHold[name] && _poseHold[name] > Date.now()) continue;
+    // Find the two samples bracketing the playback time.
+    var a = buf[0], b = null;
+    for (var i = 0; i < buf.length; i++) {
+      if (buf[i].t <= rt) { a = buf[i]; b = buf[i + 1] || null; }
+      else { if (buf[i] !== a) b = buf[i]; break; }
+    }
+    var np, nq;
+    if (b && b.t > a.t && rt >= a.t) {
+      var f = Math.min(1, (rt - a.t) / (b.t - a.t));
+      np = { x: a.x + (b.x - a.x) * f,
+             y: a.y + (b.y - a.y) * f,
+             z: a.z + (b.z - a.z) * f };
+      nq = a.q.clone().slerp(b.q, f);
+    } else {
+      var s = (rt < a.t) ? a : buf[buf.length - 1];
+      np = { x: s.x, y: s.y, z: s.z };
+      nq = s.q;
+    }
+    scene.updatePose(e, np, { x: nq.x, y: nq.y, z: nq.z, w: nq.w });
+    // Drop samples that can no longer be needed (keep one before rt).
+    while (buf.length > 2 && buf[1].t <= rt) buf.shift();
+  }
+}
 var _selLight = null;
 
 function _refreshLights(cb) {
@@ -714,7 +771,7 @@ function _scheduleLightPoll() {
 function _resolveTarget(top, leaf) {
   var name = top.name;
   if (!name || name === 'plane' || name === 'grid' || name === 'racetrack' ||
-      name === 'sun' || name === 'GRADIENT_SKY' || name === 'boundingBox' ||
+      name === 'sun' || name === 'GRADIENT_SKY' || name === 'physicar_sky' || name === 'boundingBox' ||
       name === currentWorld) {
     return null;
   }
@@ -976,7 +1033,7 @@ function _applySettings() {
   // Auto Follow
   var afEl = document.getElementById('chk-autofollow');
   afEl.checked = s.autoFollow !== undefined ? s.autoFollow : _settingsDefaults.autoFollow;
-  toggleAutoFollow(afEl.checked);
+  toggleAutoFollow(afEl.checked, true);
   // Grid
   var gridEl = document.getElementById('chk-grid');
   gridEl.checked = s.grid !== undefined ? s.grid : _settingsDefaults.grid;
@@ -1271,15 +1328,26 @@ function _isChildOf(obj, parent) {
 }
 
 var _autoFollow = false;
-// Self-managed spherical camera for auto-follow (bypass OrbitControls entirely)
+// Self-managed spherical camera for auto-follow (bypass OrbitControls entirely).
+// theta is measured RELATIVE to the vehicle heading (chase cam): the viewing
+// angle stays fixed with respect to the car, not the world axes.
 var _af = {
-  theta: Math.PI,  // camera behind (-Y), so screen X = world X, screen up ≈ world Y
+  theta: -Math.PI / 2,  // relative angle around the car; -PI/2 = directly behind (drag to adjust)
   phi: 0.9,        // ~50deg from vertical
   radius: 1.8,     // closer to target
+  yaw: null,       // smoothed vehicle heading the offset is anchored to
   dragging: false,
   lastX: 0,
   lastY: 0
 };
+
+function _getVehicleYaw(obj) {
+  var q = new THREE.Quaternion();
+  obj.getWorldQuaternion(q);
+  // z-up yaw from quaternion
+  return Math.atan2(2 * (q.w * q.z + q.x * q.y),
+                    1 - 2 * (q.y * q.y + q.z * q.z));
+}
 
 function toggleSettings() {
   var menu = document.getElementById("settings-menu");
@@ -1328,19 +1396,25 @@ function _afWheel(e) {
 }
 function _afContextMenu(e) { e.preventDefault(); }
 
-function toggleAutoFollow(on) {
+function toggleAutoFollow(on, initial) {
   _autoFollow = on;
   var el = document.getElementById("container");
   if (on) {
-    // Compute initial spherical coords from current camera
-    var obj = scene.getByName('physicar');
+    // Page load: always start with the chase view from behind the car
+    // (theta -PI/2 = directly behind, adopting the heading on first update).
+    // Only a mid-session re-toggle inherits the current camera angle below,
+    // so switching follow back on never makes the view jump.
+    var obj = initial ? null : scene.getByName('physicar');
     if (obj) {
       var pos = new THREE.Vector3();
       obj.getWorldPosition(pos);
       var offset = scene.camera.position.clone().sub(pos);
       _af.radius = offset.length();
       _af.radiusTarget = _af.radius;
-      _af.theta = Math.atan2(offset.x, offset.y);
+      // Store the angle relative to the current heading so the view doesn't
+      // jump when follow mode engages (world angle = theta - yaw).
+      _af.yaw = _getVehicleYaw(obj);
+      _af.theta = Math.atan2(offset.x, offset.y) + _af.yaw;
       _af.phi = Math.atan2(Math.sqrt(offset.x * offset.x + offset.y * offset.y), offset.z);
     }
     // Disable OrbitControls completely.
@@ -1395,10 +1469,18 @@ function _updateAutoFollow() {
     _af.radius += (_af.radiusTarget - _af.radius) * 0.15;
     if (Math.abs(_af.radius - _af.radiusTarget) < 0.001) _af.radius = _af.radiusTarget;
   }
+  // Track the vehicle heading with smoothing (shortest angular path) so the
+  // camera swings behind the car through turns instead of staying at a fixed
+  // world angle, without jittering on every pose update.
+  var vyaw = _getVehicleYaw(obj);
+  if (_af.yaw === null) _af.yaw = vyaw;
+  var dyaw = Math.atan2(Math.sin(vyaw - _af.yaw), Math.cos(vyaw - _af.yaw));
+  _af.yaw += dyaw * 0.08;
+  var th = _af.theta - _af.yaw;
   // Spherical to Cartesian offset (z-up)
   var sp = Math.sin(_af.phi);
-  var x = _af.radius * sp * Math.sin(_af.theta);
-  var y = _af.radius * sp * Math.cos(_af.theta);
+  var x = _af.radius * sp * Math.sin(th);
+  var y = _af.radius * sp * Math.cos(th);
   var z = _af.radius * Math.cos(_af.phi);
   scene.camera.position.set(target.x + x, target.y + y, target.z + z);
   scene.camera.up.set(0, 0, 1);
@@ -1415,6 +1497,7 @@ document.addEventListener("click", function(e) {
 
 function animate() {
   requestAnimationFrame(animate);
+  _applyPoseLerp();
   _updateAutoFollow();
   if (gzInteract && gzInteract.selected()) gzInteract.update();
   _updateAxes();

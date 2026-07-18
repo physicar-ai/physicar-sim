@@ -1,0 +1,49 @@
+<?xml version='1.0' encoding='utf-8'?>
+<sdf version="1.4">
+<world name="2022_june_open">
+  <scene>
+    <ambient>0.5 0.5 0.5 1.0</ambient>
+    <background>0.66 0.81 0.96 1.0</background>
+    <shadows>0</shadows>
+    <sky />
+  </scene>
+  <include>
+    <uri>model://sun</uri>
+    <pose>0.0 0.0 15.0 0 0 0</pose>
+    <cast_shadows>false</cast_shadows>
+    <attenuation>
+      <constant>0.5</constant>
+      <linear>0.01</linear>
+      <quadratic>0.0</quadratic>
+      <range>100</range>
+    </attenuation>
+  </include>
+  <light name="Light 1" type="point">
+         <pose>0 0 15 0 0 0</pose>
+         <diffuse>0.225 0.225 0.225 1</diffuse>
+         <specular>.1 .1 .1 1</specular>
+         <attenuation>
+                <constant>0.4</constant>
+                <linear>0.01</linear>
+                <quadratic>0.00</quadratic>
+                <range>50</range>
+         </attenuation>
+         <direction>0 0 -1</direction>
+         <cast_shadows>false</cast_shadows>
+  </light>
+  <include>
+    <uri>model://models/2022_june_open</uri>
+    <pose>0 0 0 0 0 0</pose>
+    <name>racetrack</name>
+  </include>
+  <physics name="default_physics" type="ode">
+    <max_step_size>0.005</max_step_size>
+    <real_time_update_rate>200</real_time_update_rate>
+  </physics>
+  <include>
+    <uri>model://models/physicar_sky</uri>
+    <pose>0 0 0 0 0 0</pose>
+    <name>physicar_sky</name>
+  </include>
+</world>
+</sdf>

@@ -113,5 +113,10 @@
     <max_step_size>0.005</max_step_size>
     <real_time_update_rate>200</real_time_update_rate>
   </physics>
+  <include>
+    <uri>model://models/physicar_sky</uri>
+    <pose>0 0 0 0 0 0</pose>
+    <name>physicar_sky</name>
+  </include>
 </world>
 </sdf>
