@@ -1609,7 +1609,29 @@ function _playMedia(msg) {
       delete _audioChannels[msg.id];
     }
   }
-  audio.onended = cleanup;
+  // SSE 재구독(리스폰=페이지 리로드 등)으로 재전송된 곡은 offset부터 이어 재생.
+  // 길이를 넘긴 비루프 곡이면(서버가 duration 을 몰랐던 URL 곡 등) 재생하지 않는다.
+  if (msg.offset > 0) {
+    audio.addEventListener("loadedmetadata", function() {
+      var d = audio.duration;
+      if (!isFinite(d)) return;
+      var off = audio.loop ? (msg.offset % d) : msg.offset;
+      if (off < d) { audio.currentTime = off; }
+      else { audio.pause(); cleanup(); }
+    });
+  }
+  audio.onended = function() {
+    cleanup();
+    // 자연 종료를 서버에 알려 보관된 재생 명령을 지운다 — 안 지우면 다음 SSE
+    // 재구독 때 끝난 곡이 다시 나온다 (URL 곡은 서버가 길이를 몰라 이 통지가
+    // 유일한 정리 수단).
+    if (!msg.loop) {
+      try {
+        fetch("/audio/stop", { method: "POST", headers: { "Content-Type": "application/json" },
+                               body: JSON.stringify({ id: msg.id }) }).catch(function() {});
+      } catch (e) { /* ignore */ }
+    }
+  };
   audio.onerror = function() {
     console.error('[Audio] media error id=' + msg.id + ' url=' + msg.url);
     cleanup();
