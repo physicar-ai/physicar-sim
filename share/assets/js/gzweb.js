@@ -402,8 +402,45 @@ function init() {
   scene.setSize(el.clientWidth, el.clientHeight);
   _initInteract(el);
   var cam = scene.camera;
-  cam.near = 0.1; cam.far = 10000; cam.updateProjectionMatrix();
+  // near/far 1:100,000 은 깊이 정밀도를 파괴해 mm 겹층(필드/도로/라인)이
+  // z-fighting 으로 회색 아스팔트·배경색을 배어나오게 한다 → 상식 범위로.
+  cam.near = 0.2; cam.far = 2000; cam.updateProjectionMatrix();
   scene.scene.fog = null;
+
+  // ── 바닥 데칼 z-fighting 방어 ──
+  // 트랙은 z=0 부근에 0.1~1.5mm 간격으로 겹친 얇은 면들(필드→도로→라인)이라
+  // 깊이 정밀도가 흔들리는 순간 아래층(회색)이 위로 올라온다. 얇고 낮은 메시를
+  // 찾아 z 순서대로 polygonOffset 을 부여 — 위층이 항상 이기게 (각도·거리 무관).
+  // 월드 전환/리스폰으로 메시가 다시 생기므로 주기적으로 재적용 (플래그로 멱등).
+  function applyDecalOffsets() {
+    try {
+      var flats = [];
+      scene.scene.traverse(function (o) {
+        if (!o.isMesh || !o.material || o.material._pcDecal) return;
+        var g = o.geometry;
+        if (!g) return;
+        if (!g.boundingBox) g.computeBoundingBox();
+        var bb = g.boundingBox;
+        if (!bb) return;
+        // 월드 z 로 판정 (트랙 메시는 변환이 항등이라 로컬≈월드)
+        var h = bb.max.z - bb.min.z;
+        if (h < 0.01 && bb.min.z > -0.1 && bb.min.z < 0.05) flats.push({ o: o, z: bb.min.z });
+      });
+      if (!flats.length) return;
+      flats.sort(function (a, b) { return a.z - b.z; });
+      flats.forEach(function (f, i) {
+        var m = f.o.material;
+        m.polygonOffset = true;
+        // 아래층일수록 뒤로 밀림 (인덱스 역순) — 최상층이 0
+        m.polygonOffsetFactor = (flats.length - 1 - i);
+        m.polygonOffsetUnits = (flats.length - 1 - i) * 2;
+        m._pcDecal = true;
+        m.needsUpdate = true;
+      });
+    } catch (e) { /* 방어적 — 뷰어 본연 동작엔 영향 금지 */ }
+  }
+  setTimeout(applyDecalOffsets, 3000);
+  setInterval(applyDecalOffsets, 5000);
   cam.position.x = 0; cam.position.y = -1.2; cam.position.z = 0.6;
   cam.up.set(0, 0, 1);
   cam.lookAt(new THREE.Vector3(0, 0, 0.1));
