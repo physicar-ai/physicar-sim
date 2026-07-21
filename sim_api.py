@@ -276,27 +276,35 @@ def _kill_all_gz():
     _sim_proc = None
     _launch_proc = None
 
+_launch_lock = threading.Lock()   # the watchdog and post_start both start
+                                  # gz-launch — unserialized, their pkills
+                                  # kill each other's fresh process
+
 def _start_launch():
     """Start gz-launch websocket server. Returns True if started successfully."""
     global _launch_proc
-    # Kill any orphan gz-launch first to avoid port 9002 conflict
-    subprocess.run(["pkill", "-9", "-f", "gz-launch"], timeout=5, capture_output=True)
-    time.sleep(0.5)
-    env = _gz_env()
-    _launch_proc = subprocess.Popen(
-        ["gz", "launch", WEBSOCKET_LAUNCH],
-        env=env,
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        start_new_session=True
-    )
-    logging.info("gz-launch started (PID %d)", _launch_proc.pid)
-    # Verify it didn't crash immediately (e.g. port in use)
-    time.sleep(1.0)
-    if _launch_proc.poll() is not None:
-        logging.error("gz-launch crashed on startup (exit %s)", _launch_proc.returncode)
-        _launch_proc = None
-        return False
-    return True
+    with _launch_lock:
+        # Kill any orphan gz-launch first to avoid port 9002 conflict
+        subprocess.run(["pkill", "-9", "-f", "gz-launch"], timeout=5, capture_output=True)
+        time.sleep(0.5)
+        env = _gz_env()
+        proc = subprocess.Popen(
+            ["gz", "launch", WEBSOCKET_LAUNCH],
+            env=env,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True
+        )
+        _launch_proc = proc
+        logging.info("gz-launch started (PID %d)", proc.pid)
+        # Verify it didn't crash immediately (e.g. port in use). Check through
+        # a local reference — a concurrent stop may null the global meanwhile.
+        time.sleep(1.0)
+        if proc.poll() is not None:
+            logging.error("gz-launch crashed on startup (exit %s)", proc.returncode)
+            if _launch_proc is proc:
+                _launch_proc = None
+            return False
+        return True
 
 def _get_world_name(world_file):
     """Extract <world name="..."> from SDF."""
@@ -328,9 +336,133 @@ def _run_gz_cmd(*args, timeout=5):
         list(args), env=env, timeout=timeout, capture_output=True, text=True
     )
 
+# ── live gz stream cache (poses + clock) ───────────────────────────────────
+# /pose and /objects used to spawn a `gz topic -e -n 1` process per request
+# (~160 ms each). Persistent readers stream the topics into memory instead,
+# and /clock exposes sim time / RTF from the same stats stream.
+_gz_cache_lock = threading.Lock()
+_gz_poses = {}          # entity name -> {x, y, z, yaw}
+_gz_clock = {}          # {"sim_time", "real_time", "rtf", "paused"}
+_gz_cache_world = None
+_gz_stats_seen = [0.0]  # monotonic time of the last stats message — a world
+                        # reload kills the streams silently, so the manager
+                        # re-attaches when this goes stale
+
+_overlay_text = ""      # free status text shown on the /sim screen
+_overlay_expiry = 0.0   # monotonic deadline — stale text disappears by
+                        # itself when the posting script dies (POST /overlay)
+
+
+def _parse_pose_block(block):
+    nm = re.search(r'name:\s*"([^"]+)"', block)
+    px = re.search(r'position\s*\{[^}]*x:\s*([\d.eE+-]+)', block)
+    py = re.search(r'position\s*\{[^}]*y:\s*([\d.eE+-]+)', block)
+    pz = re.search(r'position\s*\{[^}]*z:\s*([\d.eE+-]+)', block)
+    if not (nm and px and py and pz):
+        return None, None
+
+    def _q(axis):
+        m = re.search(r'orientation\s*\{[^}]*' + axis + r':\s*([\d.eE+-]+)', block)
+        return float(m.group(1)) if m else 0.0
+    qx, qy, qz, qw = _q('x'), _q('y'), _q('z'), _q('w')
+    yaw = math.atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz))
+    return nm.group(1), {
+        "x": round(float(px.group(1)), 6), "y": round(float(py.group(1)), 6),
+        "z": round(float(pz.group(1)), 6), "yaw": round(yaw, 6)}
+
+
+def _spawn_pose_reader(world):
+    proc = subprocess.Popen(
+        ["gz", "topic", "-e", "-t", f"/world/{world}/dynamic_pose/info"],
+        env=_gz_env(), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+
+    def pump():
+        buf, depth = [], 0
+        for line in proc.stdout:
+            buf.append(line)
+            depth += line.count("{") - line.count("}")
+            if depth <= 0 and buf:
+                name, pose = _parse_pose_block("".join(buf))
+                buf, depth = [], 0
+                if name:
+                    with _gz_cache_lock:
+                        _gz_poses[name] = pose
+    threading.Thread(target=pump, daemon=True).start()
+    return proc
+
+
+def _spawn_stats_reader(world):
+    proc = subprocess.Popen(
+        ["gz", "topic", "-e", "-t", f"/world/{world}/stats"],
+        env=_gz_env(), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+
+    def _t(name, text):
+        m = re.search(name + r'\s*\{([^}]*)\}', text)
+        if not m:
+            return None
+        sec = re.search(r'(?<!n)sec:\s*(\d+)', m.group(1))     # not "nsec:"
+        nsec = re.search(r'nsec:\s*(\d+)', m.group(1))
+        return (int(sec.group(1)) if sec else 0) + (int(nsec.group(1)) if nsec else 0) / 1e9
+
+    def pump():
+        buf = []
+        for line in proc.stdout:
+            buf.append(line)
+            if "real_time_factor" not in line:
+                continue
+            text = "".join(buf)
+            buf = []
+            rtf = re.search(r'real_time_factor:\s*([\d.eE+-]+)', text)
+            entry = {
+                "sim_time": _t("sim_time", text),
+                "real_time": _t("real_time", text),
+                "rtf": float(rtf.group(1)) if rtf else None,
+                "paused": "paused: true" in text,
+            }
+            _gz_stats_seen[0] = time.monotonic()
+            with _gz_cache_lock:
+                _gz_clock.update({k: v for k, v in entry.items() if v is not None or k == "paused"})
+    threading.Thread(target=pump, daemon=True).start()
+    return proc
+
+
+def _gz_cache_manager():
+    """(Re)attach the stream readers whenever the running world changes."""
+    global _gz_cache_world
+    procs = []
+    while True:
+        with _lock:
+            world = _current_world
+        if (world != _gz_cache_world
+                or (world and any(p.poll() is not None for p in procs))
+                or (world and procs
+                    and time.monotonic() - _gz_stats_seen[0] > 10)):
+            for pr in procs:
+                try:
+                    pr.kill()
+                except Exception:
+                    pass
+            procs = []
+            with _gz_cache_lock:
+                _gz_poses.clear()
+                _gz_clock.clear()
+            _gz_cache_world = world
+            if world:
+                try:
+                    procs = [_spawn_pose_reader(world), _spawn_stats_reader(world)]
+                    _gz_stats_seen[0] = time.monotonic()
+                except Exception:
+                    procs = []
+        time.sleep(2)
+
+
 def _get_vehicle_pose(world):
     """Query current vehicle pose in world coordinates from Gazebo."""
     import math
+    with _gz_cache_lock:
+        p = _gz_poses.get("physicar")
+        if p and _gz_cache_world == world:
+            return dict(p)
     try:
         r = _run_gz_cmd("gz", "topic", "-e", "-t",
                         f"/world/{world}/dynamic_pose/info", "-n", "1", timeout=3)
@@ -357,20 +489,35 @@ def _get_vehicle_pose(world):
     return None
 
 def _get_route(world):
-    """Load route waypoints from npy file."""
+    """Load route waypoints from npy file (center line only)."""
+    full = _get_route_full(world)
+    return full["waypoints"] if full else None
+
+def _get_route_full(world):
+    """Load the full route geometry from the 6-column npy:
+    rows are [center_x, center_y, inner_x, inner_y, outer_x, outer_y]."""
     try:
         import numpy as np
         npy = os.path.join(SHARE_DIR, "routes", world + ".npy")
         if not os.path.isfile(npy):
             return None
         d = np.load(npy)
-        return [[round(float(r[0]), 6), round(float(r[1]), 6)] for r in d]
+        def line(a, b):
+            return [[round(float(r[a]), 6), round(float(r[b]), 6)] for r in d]
+        out = {"waypoints": line(0, 1)}
+        if d.shape[1] >= 6:
+            out["inner"] = line(2, 3)
+            out["outer"] = line(4, 5)
+        return out
     except Exception:
         return None
 
 def _get_dynamic_poses(world):
     """Return {name: {x, y, z, yaw}} for every entity in dynamic_pose/info."""
     import math
+    with _gz_cache_lock:
+        if _gz_poses and _gz_cache_world == world:
+            return {k: dict(v) for k, v in _gz_poses.items()}
     out = {}
     try:
         r = _run_gz_cmd("gz", "topic", "-e", "-t",
@@ -1024,6 +1171,35 @@ class Handler(http.server.BaseHTTPRequestHandler):
             with _lock:
                 current = _current_world
             self._json(200, {"worlds": items, "current": current})
+        elif self.path == "/events":
+            # SSE: push a status snapshot whenever it changes, so clients
+            # (e.g. the app.physicar world select) need no polling
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("X-Accel-Buffering", "no")   # no proxy buffering
+            self.end_headers()
+            last, last_beat = None, time.monotonic()
+            try:
+                while True:
+                    with _lock:
+                        snap = {
+                            "running": _sim_proc is not None and _sim_proc.poll() is None,
+                            "websocket": _launch_proc is not None and _launch_proc.poll() is None,
+                            "current": _current_world,
+                            "switching": _switching,
+                        }
+                    if snap != last:
+                        self.wfile.write(f"data: {json.dumps(snap)}\n\n".encode())
+                        self.wfile.flush()
+                        last, last_beat = snap, time.monotonic()
+                    elif time.monotonic() - last_beat > 15:
+                        self.wfile.write(b": keep-alive\n\n")   # comment ping
+                        self.wfile.flush()
+                        last_beat = time.monotonic()
+                    time.sleep(1)
+            except (BrokenPipeError, ConnectionResetError):
+                return
         elif self.path == "/status":
             with _lock:
                 proc = _sim_proc
@@ -1038,7 +1214,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "current": current,
                 "switching": switching
             })
-        elif self.path == "/track_bounds":
+        elif self.path == "/bounds":
             with _lock:
                 world = _current_world
             if not world:
@@ -1049,7 +1225,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._json(200, bounds)
             else:
                 self._json(404, {"error": "bounds not available"})
-        elif self.path == "/obstacles":
+        elif self.path == "/objects":
             with _lock:
                 world = _current_world
             if not world:
@@ -1059,7 +1235,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if items is None:
                 self._json(404, {"error": "world file not found"})
                 return
-            self._json(200, {"world": world, "obstacles": items})
+            self._json(200, {"world": world, "objects": items})
+        elif self.path == "/clock":
+            with _gz_cache_lock:
+                c = dict(_gz_clock)
+            if c:
+                self._json(200, c)
+            else:
+                self._json(503, {"error": "clock not available yet"})
         elif self.path == "/pose":
             with _lock:
                 world = _current_world
@@ -1077,9 +1260,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not world:
                 self._json(404, {"error": "no world running"})
                 return
-            waypoints = _get_route(world)
-            if waypoints is not None:
-                self._json(200, {"world": world, "waypoints": waypoints})
+            route = _get_route_full(world)
+            if route is not None:
+                self._json(200, {"world": world, **route})
             else:
                 self._json(404, {"error": "route not available"})
         elif self.path == "/traffic_lights":
@@ -1087,12 +1270,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 world = _current_world
                 items = [{"name": n, **s} for n, s in sorted(_lights.items())]
             self._json(200, {"world": world, "lights": items})
+        elif self.path == "/overlay":
+            text = _overlay_text if time.monotonic() < _overlay_expiry else ""
+            self._json(200, {"text": text})
         else:
             self._json(404, {"error": "not found"})
 
     def do_POST(self):
-        global _sim_proc, _current_world, _launch_proc, _fail_count
-        if self.path == "/respawn":
+        global _sim_proc, _current_world, _launch_proc, _fail_count, \
+            _overlay_text, _overlay_expiry
+        if self.path == "/overlay":
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length)) if length else {}
+            _overlay_text = str(body.get("text", ""))[:300]
+            try:
+                ttl = min(max(float(body.get("ttl", 10)), 1.0), 3600.0)
+            except (TypeError, ValueError):
+                ttl = 10.0
+            _overlay_expiry = time.monotonic() + ttl
+            self._json(200, {"ok": True})
+        elif self.path == "/respawn":
             with _lock:
                 world = _current_world
             if not world:
@@ -1433,7 +1630,11 @@ if __name__ == "__main__":
     # 5s tick — cuts several seconds off time-to-first-camera-frame.
     threading.Thread(target=start_sim, args=(_load_boot_world(),), daemon=True).start()
     threading.Thread(target=_watchdog, daemon=True).start()
-    http.server.HTTPServer.allow_reuse_address = True
-    server = http.server.HTTPServer(("127.0.0.1", 9003), Handler)
+    threading.Thread(target=_gz_cache_manager, daemon=True).start()
+    # Threaded: long-lived streams (/events) must not block other requests.
+    # Shared state is already lock-guarded (_lock, _gz_cache_lock) because
+    # background threads mutate it concurrently with handlers anyway.
+    http.server.ThreadingHTTPServer.allow_reuse_address = True
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 9003), Handler)
     logging.info("listening on :9003")
     server.serve_forever()

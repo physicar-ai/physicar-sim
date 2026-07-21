@@ -72,6 +72,26 @@ var _audioOverlayCheck = setInterval(function() {
 }, 500);
 
 // =====================================================================
+// Status Overlay — free text pushed by user scripts (POST /sim/api/overlay)
+// =====================================================================
+var _statusOverlayLast = '';
+setInterval(function() {
+  fetch('/sim/api/overlay').then(function(r){return r.json()}).then(function(d) {
+    var text = d.text || '';
+    if (text === _statusOverlayLast) return;
+    _statusOverlayLast = text;
+    var el = document.getElementById('status-overlay');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'status-overlay';
+      document.body.appendChild(el);
+    }
+    el.textContent = text;
+    el.classList.toggle('show', !!text);
+  }).catch(function(){});
+}, 500);
+
+// =====================================================================
 // Scene Management
 // =====================================================================
 
@@ -1089,9 +1109,10 @@ function _applySettings() {
   togglePose(poEl.checked);
 }
 
-// ── 1사분면 그리드: 월드는 (0,0)~(W,H)에만 존재 — 음수 사분면 그리지 않음
-// (World Builder rebuildGrid와 동일 스타일: 1m 간격, 회색, z 0.0015)
-// 크기는 현재 트랙의 bounds(/sim/api/track_bounds)를 미터 단위로 올림해 맞춘다.
+// ── First-quadrant grid: the world only exists in (0,0)~(W,H) — no negative
+// quadrants are drawn (same style as World Builder rebuildGrid: 1 m spacing,
+// gray, z 0.0015). Sized from the current track bounds (/sim/api/bounds),
+// rounded up to whole meters.
 var _quadGrid = null;
 var _gridOn = false;
 var _gridW = 10, _gridH = 10;
@@ -1115,7 +1136,7 @@ function _rebuildQuadGrid() {
 }
 
 function _loadGridBounds() {
-  fetch("/sim/api/track_bounds")
+  fetch("/sim/api/bounds")
     .then(function(r) { return r.json(); })
     .then(function(b) {
       if (typeof b.maxX !== "number" || typeof b.maxY !== "number") { return; }
@@ -1646,27 +1667,35 @@ function _playMedia(msg) {
       delete _audioChannels[msg.id];
     }
   }
-  // SSE 재구독(리스폰=페이지 리로드 등)으로 재전송된 곡은 offset부터 이어 재생.
-  // 길이를 넘긴 비루프 곡이면(서버가 duration 을 몰랐던 URL 곡 등) 재생하지 않는다.
-  if (msg.offset > 0) {
-    audio.addEventListener("loadedmetadata", function() {
-      var d = audio.duration;
-      if (!isFinite(d)) return;
+  audio.onloadedmetadata = function() {
+    var d = audio.duration;
+    // report the duration — the server can't probe remote media itself, and
+    // without it a finished URL item would replay on the next SSE subscribe
+    if (isFinite(d) && d > 0) {
+      fetch('/audio/duration', { method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: msg.id, duration: d })
+      }).catch(function() {});
+    }
+    // resume mid-song on SSE replay (server sends the elapsed offset). A song
+    // already past its end (a non-loop URL item the server couldn't measure)
+    // is not replayed.
+    if (msg.offset > 0 && isFinite(d)) {
       var off = audio.loop ? (msg.offset % d) : msg.offset;
-      if (off < d) { audio.currentTime = off; }
+      if (off < d) { try { audio.currentTime = off; } catch (e) { /* ignore */ } }
       else { audio.pause(); cleanup(); }
-    });
-  }
+    }
+  };
   audio.onended = function() {
     cleanup();
-    // 자연 종료를 서버에 알려 보관된 재생 명령을 지운다 — 안 지우면 다음 SSE
-    // 재구독 때 끝난 곡이 다시 나온다 (URL 곡은 서버가 길이를 몰라 이 통지가
-    // 유일한 정리 수단).
-    if (!msg.loop) {
-      try {
-        fetch("/audio/stop", { method: "POST", headers: { "Content-Type": "application/json" },
-                               body: JSON.stringify({ id: msg.id }) }).catch(function() {});
-      } catch (e) { /* ignore */ }
+    // natural end — notify the server so the stored play command is cleared,
+    // otherwise the finished song replays on the next SSE subscribe (URL items
+    // rely on this since the server never learned their length)
+    if (!audio.loop) {
+      fetch('/audio/stop', { method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: msg.id })
+      }).catch(function() {});
     }
   };
   audio.onerror = function() {

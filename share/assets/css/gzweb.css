@@ -174,3 +174,11 @@ body { background: #1a1a2e; color: #eee; font-family: sans-serif; overflow: hidd
                          border-radius: calc(var(--u)*0.9); text-align: center;
                          font-size: calc(var(--u)*1.38); line-height: 1.6; color: #fff; }
 .audio-overlay-content span { font-size: var(--u); color: #aaa; }
+
+/* Status overlay (POST /sim/api/overlay) */
+#status-overlay { position: fixed; top: calc(var(--u)*0.9); left: 50%; transform: translateX(-50%);
+                  background: rgba(0,0,0,0.55); color: #eee; padding: calc(var(--u)*0.3) calc(var(--u)*0.8);
+                  border-radius: calc(var(--u)*0.5); font-size: calc(var(--u)*0.75); z-index: 9997;
+                  opacity: 0; pointer-events: none; transition: opacity 0.3s;
+                  max-width: 90%; text-align: center; font-variant-numeric: tabular-nums; }
+#status-overlay.show { opacity: 1; }
