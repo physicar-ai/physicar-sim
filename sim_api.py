@@ -1446,6 +1446,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 _extract_world(tmp_path, world_name)
                 logging.info("upload complete: %s -> %s", upload_id, world_name)
                 self._json(200, {"ok": True, "world": world_name})
+            except Exception as e:
+                # 예외를 밖으로 흘리면 요청 스레드가 죽어 클라이언트는 원인 없는 502를
+                # 받는다 (실사례: share/ 가 root 소유라 PermissionError → 502).
+                logging.exception("upload complete failed: %s", upload_id)
+                self._json(500, {"error": f"import failed: {type(e).__name__}: {e}"})
             finally:
                 try:
                     os.unlink(tmp_path)
