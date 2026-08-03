@@ -34,6 +34,7 @@ var GzInteract = (function() {
     // ── 회전 점 핸들 — WB rotRing과 동일 지오메트리 (파란 점 + 원형 화살표) ──
     var rotRing = (function() {
       var g = new THREE.Group();
+      g.userData.pcPersistent = true;   // page fixture — survives clearScene
       var dot = new THREE.Mesh(new THREE.CircleGeometry(0.028, 14),
         new THREE.MeshBasicMaterial({ color: 0x1976d2, depthTest: false, transparent: true, opacity: 0.95 }));
       var rim = new THREE.Mesh(new THREE.RingGeometry(0.028, 0.04, 14),

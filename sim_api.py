@@ -1056,6 +1056,14 @@ def start_sim(world_file):
                     _scan_world_lights(wname)
                     logging.info("physicar spawned, starting gz-launch")
                     _start_launch()
+                    # The ros_gz bridge can come up mid-switch and wedge on the
+                    # dead gz instance (process alive, transport silent — no
+                    # camera/lidar/drive). Kill it now that the new instance is
+                    # fully up; the ROS launch respawns it in ~2 s, giving a
+                    # deterministic "gz first, bridge second" attach order.
+                    subprocess.run(["pkill", "-f", "ros_gz_bridge/parameter_bridge"],
+                                   timeout=5, capture_output=True)
+                    logging.info("ros_gz bridge restarted against the new world")
                 finally:
                     with _lock:
                         _switching = False
@@ -1208,11 +1216,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 switching = _switching
             sim_ok = proc is not None and proc.poll() is None
             ws_ok = launch is not None and launch.poll() is None
+            # Version key for the viewer's mesh/texture URLs (?v=...): the
+            # asset dirs' mtime, so a world re-upload changes every URL and
+            # bypasses the browser cache instantly (see gzweb.js).
+            version = 0
+            for p in (os.path.join(SHARE_DIR, "meshes", current or ""),
+                      os.path.join(SHARE_DIR, "models")):
+                try:
+                    version = max(version, int(os.path.getmtime(p)))
+                except OSError:
+                    pass
             self._json(200, {
                 "running": sim_ok,
                 "websocket": ws_ok,
                 "current": current,
-                "switching": switching
+                "switching": switching,
+                "assets_version": version
             })
         elif self.path == "/bounds":
             with _lock:
