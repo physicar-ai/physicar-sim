@@ -19,6 +19,33 @@ var reconnectTimer = null;
 var connected = false;
 
 // =====================================================================
+// Vehicle Profile (generation seam)
+// =====================================================================
+// 기본값 = 1세대 physicar. 부팅 시 /sim/api/vehicle 로 서버(스폰 주체)와 같은
+// 프로파일을 받아 덮어쓴다 — 뷰어가 차량 정체(이름·라이다 스펙·메시 프리픽스)를
+// 하드코딩하지 않는 유일한 장치. 응답 전에도 기본값으로 동작한다(1세대와 동일).
+var VEHICLE = {
+  model_name: 'physicar',
+  lidar: { samples: 720, min_range: 0.15, max_range: 16.0, offset: [-0.027, 0, 0.183] },
+  mesh_prefix: 'physicar/',
+  mesh_exclude: 'Base.'
+};
+function _applyVehicleProfile(v) {
+  if (!v || !v.model_name) return;
+  VEHICLE = v;
+  var l = v.lidar || {};
+  _lidarSamples = l.samples || 720;
+  _lidarAngleStep = 2 * Math.PI / _lidarSamples;
+  _lidarMinRange = (l.min_range != null) ? l.min_range : 0.15;
+  _lidarMaxRange = (l.max_range != null) ? l.max_range : 16;
+  var o = l.offset || [-0.027, 0, 0.183];
+  _lidarLocalOffset = new THREE.Vector3(o[0], o[1], o[2]);
+}
+if (location.pathname.startsWith('/sim')) {
+  fetch('/sim/api/vehicle').then(function(r){return r.json()}).then(_applyVehicleProfile).catch(function(){});
+}
+
+// =====================================================================
 // Toast Notification
 // =====================================================================
 var _toastTimer = null;
@@ -847,7 +874,7 @@ function _resolveTarget(top, leaf) {
   if (marker === 'light' || marker === 'signal' || _lightsCache[name]) {
     return { obj: top, name: name, kind: 'light' }; // 단일 강체 — 램프는 링크 visual
   }
-  if (name === 'physicar') { return { obj: top, name: name, kind: 'vehicle' }; }
+  if (name === VEHICLE.model_name) { return { obj: top, name: name, kind: 'vehicle' }; }
   return { obj: top, name: name, kind: 'object' };
 }
 
@@ -976,7 +1003,7 @@ function _createAudioRing() {
 function _updateAudioRing() {
   if (!_audioRing) return;
   
-  var physicarObj = scene.getByName('physicar');
+  var physicarObj = scene.getByName(VEHICLE.model_name);
   if (!physicarObj) {
     _audioRing.visible = false;
     return;
@@ -1029,7 +1056,7 @@ function _updateDistanceVolume() {
   if (!_distanceVolumeEnabled || !_audioReady) return;
   
   // Find physicar model
-  var physicarObj = scene.getByName('physicar');
+  var physicarObj = scene.getByName(VEHICLE.model_name);
   if (!physicarObj) return;
   
   // Get world position of physicar
@@ -1200,7 +1227,7 @@ function _makeAxesHelper(size) {
 
 function _updateAxes() {
   if (!_axesEnabled || !connected) return;
-  var model = scene.getByName('physicar');
+  var model = scene.getByName(VEHICLE.model_name);
   if (!model) return;
   model.updateMatrixWorld(true);
 
@@ -1241,7 +1268,7 @@ function togglePose(on) {
 
 function _updatePose() {
   if (!_poseEnabled || !connected) return;
-  var obj = scene.getByName('physicar');
+  var obj = scene.getByName(VEHICLE.model_name);
   if (!obj) return;
   var pos = new THREE.Vector3();
   obj.getWorldPosition(pos);
@@ -1289,11 +1316,13 @@ function _updatePose() {
 var _lidarEnabled = false;
 var _lidarPoints = null; // THREE.Points
 var _lidarRaycaster = new THREE.Raycaster();
-var _lidarAngleStep = 0.5 * Math.PI / 180; // 0.5 degree
-var _lidarSamples = Math.round(2 * Math.PI / _lidarAngleStep); // 720
-var _lidarMinRange = 0.15;
-var _lidarMaxRange = 16;
-var _lidarLocalOffset = new THREE.Vector3(-0.027, 0, 0.183); // lidar pos relative to base_footprint
+// 라이다 스펙은 차량 프로파일(/sim/api/vehicle)이 단일 소스 — SDF 와 손동기화 금지.
+// 아래 초기값은 프로파일 응답 전 폴백(1세대와 동일)이며 _applyVehicleProfile 이 갱신한다.
+var _lidarSamples = VEHICLE.lidar.samples; // 720
+var _lidarAngleStep = 2 * Math.PI / _lidarSamples; // 0.5 degree
+var _lidarMinRange = VEHICLE.lidar.min_range;
+var _lidarMaxRange = VEHICLE.lidar.max_range;
+var _lidarLocalOffset = new THREE.Vector3(VEHICLE.lidar.offset[0], VEHICLE.lidar.offset[1], VEHICLE.lidar.offset[2]); // lidar pos relative to base_footprint
 var _lidarFrameSkip = 0;
 var _lidarLines = null; // THREE.LineSegments for beams
 
@@ -1309,7 +1338,7 @@ function _updateLidar() {
   _lidarFrameSkip = (_lidarFrameSkip + 1) % 3;
   if (_lidarFrameSkip !== 0 && _lidarPoints) return;
 
-  var model = scene.getByName('physicar');
+  var model = scene.getByName(VEHICLE.model_name);
   if (!model) return;
 
   // Get lidar world position & rotation
@@ -1462,7 +1491,7 @@ function toggleAutoFollow(on, initial) {
     // (theta -PI/2 = directly behind, adopting the heading on first update).
     // Only a mid-session re-toggle inherits the current camera angle below,
     // so switching follow back on never makes the view jump.
-    var obj = initial ? null : scene.getByName('physicar');
+    var obj = initial ? null : scene.getByName(VEHICLE.model_name);
     if (obj) {
       var pos = new THREE.Vector3();
       obj.getWorldPosition(pos);
@@ -1517,8 +1546,8 @@ function toggleAutoFollow(on, initial) {
 
 function _updateAutoFollow() {
   if (!_autoFollow) return;
-  if (gzInteract && gzInteract.isManipulating('physicar')) return;
-  var obj = scene.getByName('physicar');
+  if (gzInteract && gzInteract.isManipulating(VEHICLE.model_name)) return;
+  var obj = scene.getByName(VEHICLE.model_name);
   if (!obj) return;
   var target = new THREE.Vector3();
   obj.getWorldPosition(target);
@@ -1898,7 +1927,7 @@ var gzScene = GzScene.create({
   },
   isPhysicarMesh: function(uri) {
     var p = _meshPath(uri);
-    return p.indexOf('physicar/') === 0 && p.indexOf('Base.') < 0;
+    return p.indexOf(VEHICLE.mesh_prefix) === 0 && (!VEHICLE.mesh_exclude || p.indexOf(VEHICLE.mesh_exclude) < 0);
   }
 });
 

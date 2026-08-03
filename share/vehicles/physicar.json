@@ -1,0 +1,6 @@
+{
+  "model_name": "physicar",
+  "lidar": { "samples": 720, "min_range": 0.15, "max_range": 16.0, "offset": [-0.027, 0.0, 0.183] },
+  "mesh_prefix": "physicar/",
+  "mesh_exclude": "Base."
+}

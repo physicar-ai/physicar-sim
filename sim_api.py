@@ -16,9 +16,38 @@ DEFAULT_WORLD = "physicar_base.world"
 # Last successfully started world, persisted across restarts/reboots
 LAST_WORLD_FILE = "/opt/physicar/userdata/last_world"
 
+# ── Vehicle profile (generation seam) ───────────────────────────────────
+# The cloud injects PHYSICAR_GENERATION at workspace boot (defaults to gen 1).
+# share/vehicles/<gen>.json is the single source of the vehicle identity
+# (model name, lidar spec, mesh prefix) — the viewer reads the same profile
+# via GET /api/vehicle, so neither side hardcodes the vehicle.
+GENERATION = os.environ.get("PHYSICAR_GENERATION", "physicar")
+_DEFAULT_VEHICLE = {
+    "generation": "physicar",
+    "model_name": "physicar",
+    "lidar": {"samples": 720, "min_range": 0.15, "max_range": 16.0, "offset": [-0.027, 0.0, 0.183]},
+    "mesh_prefix": "physicar/",
+    "mesh_exclude": "Base.",
+}
+
+def _load_vehicle(gen):
+    try:
+        with open(os.path.join(SHARE_DIR, "vehicles", f"{gen}.json")) as f:
+            v = {**_DEFAULT_VEHICLE, **json.load(f)}
+            v["generation"] = gen
+            return v
+    except Exception:
+        if gen != _DEFAULT_VEHICLE["generation"]:
+            logging.warning("vehicle profile for '%s' missing/invalid — using physicar defaults", gen)
+        return dict(_DEFAULT_VEHICLE)
+
+VEHICLE = _load_vehicle(GENERATION)
+VEHICLE_NAME = VEHICLE["model_name"]
+
 # Protected worlds/models that cannot be deleted or overwritten
 PROTECTED_NAMES = {"physicar_base", "physicar", "sun", "physicar_sky",
-                   "box_obstacle", "physicar_box_obstacle", "physicar_ball", "physicar_cone"}
+                   "box_obstacle", "physicar_box_obstacle", "physicar_ball", "physicar_cone",
+                   VEHICLE_NAME}
 MAX_UPLOAD_SIZE = 50 * 1024 * 1024  # 50MB
 CHUNK_SIZE = 10 * 1024 * 1024  # 10MB chunks for Codespaces proxy limit
 UPLOAD_TIMEOUT = 600  # 10 minutes
@@ -460,7 +489,7 @@ def _get_vehicle_pose(world):
     """Query current vehicle pose in world coordinates from Gazebo."""
     import math
     with _gz_cache_lock:
-        p = _gz_poses.get("physicar")
+        p = _gz_poses.get(VEHICLE_NAME)
         if p and _gz_cache_world == world:
             return dict(p)
     try:
@@ -471,7 +500,7 @@ def _get_vehicle_pose(world):
     except Exception:
         return None
     for block in re.split(r'(?=^pose \{)', r.stdout, flags=re.MULTILINE):
-        if not re.search(r'name:\s*"physicar"', block):
+        if not re.search(r'name:\s*"%s"' % re.escape(VEHICLE_NAME), block):
             continue
         px = re.search(r'position\s*\{[^}]*x:\s*([\d.eE+-]+)', block)
         py = re.search(r'position\s*\{[^}]*y:\s*([\d.eE+-]+)', block)
@@ -1047,7 +1076,7 @@ def start_sim(world_file):
                                 "--reqtype", "gz.msgs.EntityFactory",
                                 "--reptype", "gz.msgs.Boolean",
                                 "--timeout", "5000",
-                                "--req", f'sdf_filename: "model://physicar", pose: {{{pose}}}, name: "physicar"')
+                                "--req", f'sdf_filename: "model://{VEHICLE_NAME}", pose: {{{pose}}}, name: "{VEHICLE_NAME}"')
                     # Verify sim is still alive before starting websocket
                     if proc.poll() is not None:
                         logging.error("gz sim died after spawn (exit %s)", proc.returncode)
@@ -1168,7 +1197,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
-        if self.path == "/worlds":
+        if self.path == "/vehicle":
+            # Vehicle profile for the viewer — same source the sim spawns from
+            self._json(200, VEHICLE)
+        elif self.path == "/worlds":
             worlds = sorted(glob.glob(os.path.join(WORLDS_DIR, "*.world")))
             items = []
             for w in worlds:
@@ -1523,7 +1555,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not (-100 <= x <= 100 and -100 <= y <= 100):
                 self._json(400, {"error": "position out of range"})
                 return
-            if not _set_entity_pose(world, "physicar", x, y, 0.05, yaw):
+            if not _set_entity_pose(world, VEHICLE_NAME, x, y, 0.05, yaw):
                 self._json(500, {"error": "pose change failed"})
                 return
             logging.info("vehicle teleported to (%.2f, %.2f, yaw %.2f)", x, y, yaw)
@@ -1540,8 +1572,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not world or switching:
                 self._json(409, {"error": "world not ready"})
                 return
-            if name in ("physicar", "racetrack", "sun"):
-                self._json(403, {"error": "use POST /pose for the vehicle" if name == "physicar"
+            if name in (VEHICLE_NAME, "racetrack", "sun"):
+                self._json(403, {"error": "use POST /pose for the vehicle" if name == VEHICLE_NAME
                                  else f"{name} cannot be moved"})
                 return
             items = _get_builtin_obstacles(world) or []
