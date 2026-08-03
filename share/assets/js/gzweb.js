@@ -2,10 +2,11 @@
 // Gazebo Web Viewer - Main JavaScript
 // =====================================================================
 
-// 앱(/app) 임베드 시 상단 툴바(Respawn/월드/Import)는 래퍼 패널 헤더가 대신 제공
+// 임베드(래퍼가 툴바를 대신 제공) 판정은 명시적 쿼리(?embed=1)로만 — iframe 여부로
+// 판단하면 sim.physicar 탭(확장 웹뷰 안 iframe)에서도 툴바가 사라진다.
 try {
-  if (window.parent !== window) { document.documentElement.classList.add("embedded"); }
-} catch (e) { document.documentElement.classList.add("embedded"); }
+  if (new URLSearchParams(location.search).has("embed")) { document.documentElement.classList.add("embedded"); }
+} catch (e) { /* 판정 실패 = 독립 화면 취급 */ }
 
 var wsProtocol = (location.protocol === "https:") ? "wss://" : "ws://";
 var wsUrl;
