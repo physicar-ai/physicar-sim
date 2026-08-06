@@ -22,15 +22,19 @@ An HTTP API for track management and vehicle state queries is served under the `
 | `GET` | `/sim/api/status` | Simulator runtime status |
 | `GET` | `/sim/api/pose` | Vehicle pose (world absolute coordinates) |
 | `POST` | `/sim/api/pose` | Teleport the vehicle (`{"x": 1.0, "y": 2.0, "yaw": 0.0}` — omitted fields keep their current value; the pose is normalized upright at ground level, so this also rights a flipped car) |
-| `GET` | `/sim/api/route` | Track waypoints (route) |
-| `GET` | `/sim/api/track_bounds` | Track bounds (bounding box) |
-| `GET` | `/sim/api/obstacles` | World models query (name, `type`: object/wall/light, static, movable, origin/current pose, size) |
+| `GET` | `/sim/api/clock` | Sim time / real time / RTF / paused |
+| `GET` | `/sim/api/events` | SSE stream of status snapshots (pushed on change — no polling needed) |
+| `GET` | `/sim/api/route` | Track centerline waypoints, plus inner/outer boundary lines when available |
+| `GET` | `/sim/api/bounds` | Track bounds (bounding box) |
+| `GET` | `/sim/api/objects` | World models query (name, `type`: object/wall/light, static, movable, origin/current pose, size) |
 | `POST` | `/sim/api/models/<name>/pose` | Move/rotate a world object (`{"x": 1.0, "y": 2.0, "z": 0.1, "yaw": 0.0}` — omitted fields keep their current value; rotation is yaw-only. Works for World Builder objects and traffic lights; walls and the track itself are rejected) |
 | `GET` | `/sim/api/worlds` | World list (includes the current world) |
 | `POST` | `/sim/api/respawn` | Reload the world to reset all objects to their start state |
 | `POST` | `/sim/api/switch` | Switch world (`{"world": "<name>.world"}`) |
 | `GET` | `/sim/api/traffic_lights` | List the world's traffic lights and their states |
 | `POST` | `/sim/api/traffic_lights/<name>` | Change a light state (`{"state": "red"}` or `{"state": "green"}` — green→red passes through 3 s of yellow, during which commands are rejected with 409) |
+| `GET` | `/sim/api/overlay` | Current on-screen status text (`{"text": ...}`) |
+| `POST` | `/sim/api/overlay` | Show status text on the `/sim` screen (`{"text": "...", "ttl": 10}` — text ≤300 chars, ttl 1–3600 s; expires by itself, e.g. training progress) |
 
 The web viewer supports World Builder-style direct manipulation: click an object to
 select it (white box), drag to move it, and drag the blue dot handle to rotate it.
