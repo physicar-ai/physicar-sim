@@ -3,14 +3,14 @@
 <head>
   <meta charset="utf-8" />
   <title>Gazebo Web</title>
-  <link rel="stylesheet" href="assets/css/gzweb.css?v=5">
+  <link rel="stylesheet" href="assets/css/gzweb.css?v=8">
   <script src="assets/lib/protobuf.min.js?v=1"></script>
   <script src="assets/lib/eventemitter2.min.js?v=2"></script>
   <script src="assets/lib/gz.js?v=2"></script>
   <script src="assets/lib/gz3d.js?v=2"></script>
   <script src="assets/js/gz-scene.js?v=4"></script>
   <script src="assets/js/gz-interact.js?v=3"></script>
-  <script src="assets/js/gzweb.js?v=30"></script>
+  <script src="assets/js/gzweb.js?v=36"></script>
 </head>
 <body onload="init()">
   <!-- Toolbar: 3-column grid — respawn left, world chip TRUE center at any
@@ -28,6 +28,10 @@
       <label><input type="checkbox" id="chk-axes" onchange="toggleAxes(this.checked); saveSettings()"> TF</label>
       <label><input type="checkbox" id="chk-lidar" onchange="toggleLidar(this.checked); saveSettings()"> LiDAR</label>
       <label><input type="checkbox" id="chk-pose" onchange="togglePose(this.checked); saveSettings()"> Pose Info</label>
+      <label id="brightness-row" title="Applies instantly to the viewer and the robot camera; shared across all viewers">
+        Brightness
+        <span class="b-line"><input type="range" id="brightness-slider" min="0.2" max="2" step="0.1" value="1"
+          oninput="setBrightness(this.value)"><span id="brightness-val">1.0</span></span></label>
     </div>
   </div>
   </div><!-- /#toolbar -->
@@ -60,5 +64,29 @@
     </div>
   </div>
   <input type="file" id="file-input" accept=".tar.gz,.gz" onchange="handleFile(this.files[0])" style="display:none">
+  <!-- Mouse-controls hint, shown on every load: dismissed by any click, the X, or a 10 s timeout -->
+  <div id="mouse-hint">
+    <div class="mh-card">
+      <div class="mh-head"><span>Mouse Controls</span><span class="mh-close">&times;</span></div>
+      <svg viewBox="0 0 340 160" font-family="sans-serif">
+        <rect x="140" y="40" width="60" height="110" rx="30" fill="#262649" stroke="#aab" stroke-width="2"/>
+        <path d="M170 40 V86 M140 86 H200" stroke="#aab" stroke-width="2" fill="none"/>
+        <rect x="164" y="54" width="12" height="24" rx="6" fill="#4ade80"/>
+        <polyline points="152,62 118,47 64,47" stroke="#60a5fa" stroke-width="1.5" fill="none"/>
+        <circle cx="152" cy="62" r="3.5" fill="#60a5fa"/>
+        <text x="91" y="39" text-anchor="middle" font-size="15" font-weight="600" fill="#fff">Rotate</text>
+        <text x="91" y="63" text-anchor="middle" font-size="11" fill="#99a">left drag</text>
+        <polyline points="188,62 222,47 276,47" stroke="#fbbf24" stroke-width="1.5" fill="none"/>
+        <circle cx="188" cy="62" r="3.5" fill="#fbbf24"/>
+        <text x="249" y="39" text-anchor="middle" font-size="15" font-weight="600" fill="#fff">Pan</text>
+        <text x="249" y="63" text-anchor="middle" font-size="11" fill="#99a">right drag</text>
+        <polyline points="170,80 126,114 72,114" stroke="#4ade80" stroke-width="1.5" fill="none"/>
+        <circle cx="170" cy="80" r="3.5" fill="#4ade80"/>
+        <text x="99" y="106" text-anchor="middle" font-size="15" font-weight="600" fill="#fff">Zoom</text>
+        <text x="99" y="130" text-anchor="middle" font-size="11" fill="#99a">scroll</text>
+      </svg>
+      <div class="mh-tip">Click anywhere to close</div>
+    </div>
+  </div>
 </body>
 </html>

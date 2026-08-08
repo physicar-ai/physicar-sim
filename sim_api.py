@@ -836,6 +836,38 @@ def _spawn_yellow_overlay(world, name, sig):
     except Exception as e:
         logging.warning("yellow overlay spawn failed: %s (%s)", name, e)
 
+# ── Scene brightness factor (presentation layer) ───────────────────────────
+# The gz sensor render scene ignores runtime light changes (verified: even
+# deleting the sun leaves the camera image untouched), and restarting the
+# world per change is terrible UX. Instead this factor is applied instantly
+# by the consumers: the web viewer scales its lights, and the webserver
+# scales the camera frames (shadows are off in these worlds, so pixel
+# scaling is visually equivalent to light scaling). Single server-side
+# value -> every browser stays in sync. Persisted across restarts.
+_BRIGHTNESS_FILE = "/opt/physicar/userdata/sim_brightness.json"
+_brightness = 1.0
+
+def _load_brightness():
+    global _brightness
+    try:
+        with open(_BRIGHTNESS_FILE) as f:
+            v = float(json.load(f).get("value", 1.0))
+        _brightness = min(2.0, max(0.2, v))
+    except Exception:
+        _brightness = 1.0
+
+def _save_brightness(v):
+    global _brightness
+    _brightness = min(2.0, max(0.2, float(v)))
+    try:
+        os.makedirs(os.path.dirname(_BRIGHTNESS_FILE), exist_ok=True)
+        with open(_BRIGHTNESS_FILE, "w") as f:
+            json.dump({"value": _brightness}, f)
+    except Exception:
+        logging.exception("brightness save failed")
+
+_load_brightness()
+
 _OVERLAY_SDF_DIR = "/tmp/physicar_light_overlays"
 
 def _pose_fields(x, y, z, yaw, pitch=0.0):
@@ -1228,6 +1260,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if self.path == "/vehicle":
             # Vehicle profile for the viewer — same source the sim spawns from
             self._json(200, VEHICLE)
+        elif self.path == "/brightness":
+            self._json(200, {"value": _brightness})
         elif self.path == "/worlds":
             worlds = sorted(glob.glob(os.path.join(WORLDS_DIR, "*.world")))
             items = []
@@ -1371,6 +1405,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 ttl = 10.0
             _overlay_expiry = time.monotonic() + ttl
             self._json(200, {"ok": True})
+        elif self.path == "/brightness":
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length)) if length else {}
+            try:
+                v = float(body.get("value"))
+            except (TypeError, ValueError):
+                self._json(400, {"error": "value must be a number (0.2-2.0)"})
+                return
+            if not (0.2 <= v <= 2.0):
+                self._json(400, {"error": "value out of range (0.2-2.0)"})
+                return
+            _save_brightness(v)
+            self._json(200, {"ok": True, "value": _brightness})
         elif self.path == "/respawn":
             with _lock:
                 world = _current_world

@@ -26,6 +26,8 @@ An HTTP API for track management and vehicle state queries is served under the `
 | `GET` | `/sim/api/events` | SSE stream of status snapshots (pushed on change — no polling needed) |
 | `GET` | `/sim/api/route` | Track centerline waypoints, plus inner/outer boundary lines when available |
 | `GET` | `/sim/api/bounds` | Track bounds (bounding box) |
+| `GET` | `/sim/api/brightness` | Scene brightness factor (`{"value": 1.0}`) |
+| `POST` | `/sim/api/brightness` | Set scene brightness (`{"value": 0.2..2.0}`, 1.0 = default). Applied instantly at the display layer — the 3D viewer and the robot camera frames darken/brighten by the same factor (no world restart). One shared server-side value: every open viewer stays in sync. Persists across world switches and restarts |
 | `GET` | `/sim/api/objects` | World models query (name, `type`: object/wall/light, static, movable, origin/current pose, size) |
 | `POST` | `/sim/api/models/<name>/pose` | Move/rotate a world object (`{"x": 1.0, "y": 2.0, "z": 0.1, "yaw": 0.0}` — omitted fields keep their current value; rotation is yaw-only. Works for World Builder objects and traffic lights; walls and the track itself are rejected) |
 | `GET` | `/sim/api/worlds` | World list (includes the current world) |

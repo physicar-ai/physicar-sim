@@ -389,6 +389,26 @@ function scheduleReconnect() {
 }
 
 // =====================================================================
+// Mouse-controls hint
+// =====================================================================
+
+// Shown on every page load. Dismissed by any click, the X, or a 10 s
+// timeout.
+function _initMouseHint() {
+  var el = document.getElementById("mouse-hint");
+  if (!el) return;
+  var timer = null;
+  function dismiss() {
+    if (timer) { clearTimeout(timer); timer = null; }
+    el.classList.remove("show");
+    setTimeout(function () { if (el.parentNode) el.parentNode.removeChild(el); }, 350);
+  }
+  el.addEventListener("click", dismiss);
+  setTimeout(function () { el.classList.add("show"); }, 300);
+  timer = setTimeout(dismiss, 10000);
+}
+
+// =====================================================================
 // Scene Initialization
 // =====================================================================
 
@@ -486,7 +506,7 @@ function init() {
       });
     } catch (e) { /* 방어적 */ }
   }
-  function _groundUpkeep() { applyDecalLift(); applyTextureAniso(); }
+  function _groundUpkeep() { applyDecalLift(); applyTextureAniso(); _syncBrightness(); }
   setTimeout(_groundUpkeep, 3000);
   setInterval(_groundUpkeep, 5000);
   cam.position.x = 0; cam.position.y = -1.2; cam.position.z = 0.6;
@@ -577,6 +597,7 @@ function init() {
   // Apply saved settings then connect
   _applySettings();
   connect();
+  _initMouseHint();
 }
 
 // =====================================================================
@@ -837,6 +858,49 @@ function switchWorld(worldFile) {
     }, 1000);
   }).catch(function() { setControlsEnabled(true); });
 }
+
+// ── Scene brightness: one server-side factor, applied instantly ──
+// The viewer scales its lights; the webserver scales the camera frames.
+// (The gz sensor scene ignores runtime light changes, and a world restart
+// per change was terrible UX — no scene reload happens here.)
+var _brightFactor = 1.0;
+var _brightPostTimer = null;
+function applyViewerBrightness() {
+  // A CSS brightness() filter on the render canvas — the exact same linear
+  // pixel scaling the webserver applies to the camera frames, so the viewer
+  // and the robot camera match by construction (sky included). Light-
+  // intensity scaling was tried first and dimmed far less than the camera.
+  try {
+    scene.renderer.domElement.style.filter =
+      (Math.abs(_brightFactor - 1) < 0.01) ? "" : ("brightness(" + _brightFactor + ")");
+  } catch (e) { /* defensive */ }
+}
+function setBrightness(v) {
+  _brightFactor = Math.min(2, Math.max(0.2, +v));
+  document.getElementById("brightness-val").textContent = _brightFactor.toFixed(1);
+  applyViewerBrightness();          // instant locally
+  clearTimeout(_brightPostTimer);   // debounce server writes while dragging
+  _brightPostTimer = setTimeout(function () {
+    fetch("/sim/api/brightness", { method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ value: _brightFactor }) }).catch(function () {});
+  }, 250);
+}
+function _syncBrightness() {
+  fetch("/sim/api/brightness").then(function (r) { return r.json(); }).then(function (d) {
+    if (!d || !d.value) return;
+    var slider = document.getElementById("brightness-slider");
+    if (document.activeElement === slider) return;   // don't fight a drag
+    if (Math.abs(d.value - _brightFactor) > 0.01) {
+      _brightFactor = +d.value;
+      slider.value = d.value;
+      document.getElementById("brightness-val").textContent = (+d.value).toFixed(1);
+    }
+    // also re-grips lights created after a world switch
+    applyViewerBrightness();
+  }).catch(function () {});
+}
+_syncBrightness();
 
 setTimeout(loadWorlds, 500);
 document.addEventListener("keydown", function(e) {
