@@ -634,6 +634,48 @@ function _wmStatus(msg, cls) {
   el.className = cls || "";
 }
 
+// Inline overwrite confirm (webviews drop native confirm()). The upload
+// session is held server-side: Replace re-completes it with overwrite,
+// Cancel discards it — either way no second upload.
+function _wmOverwriteConfirm(world, uploadId) {
+  var el = document.getElementById("wm-status");
+  el.className = "";
+  el.textContent = "";
+  var span = document.createElement("span");
+  span.textContent = "World \"" + world + "\" already exists. Replace it?";
+  var rep = document.createElement("button");
+  rep.className = "wm-ow danger";
+  rep.textContent = "Replace";
+  var can = document.createElement("button");
+  can.className = "wm-ow";
+  can.textContent = "Cancel";
+  el.appendChild(span); el.appendChild(rep); el.appendChild(can);
+  rep.onclick = function () {
+    _wmStatus("Processing...", "");
+    fetch("/sim/api/upload/complete", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({upload_id: uploadId, overwrite: true})
+    })
+    .then(function (r) { return r.json(); })
+    .then(function (res) {
+      if (!res.ok) throw new Error(res.error || "Upload failed");
+      _wmStatus("World \"" + res.world + "\" replaced!", "success");
+      loadWorlds(res.world);
+      setTimeout(function () { closeWorldModal(); switchWorld(res.world + ".world"); }, 1500);
+    })
+    .catch(function (e) { _wmStatus("Upload failed: " + e.message, "error"); });
+  };
+  can.onclick = function () {
+    fetch("/sim/api/upload/cancel", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({upload_id: uploadId})
+    }).catch(function () {});
+    _wmStatus("Import cancelled.", "");
+  };
+}
+
 function renderWorldLists() {
   var official = document.getElementById("wm-official");
   var custom = document.getElementById("wm-custom");
@@ -728,6 +770,9 @@ window.addEventListener("load", function() {
 
 function handleFile(file) {
   if (!file) return;
+  // Reset the picker so cancelling and re-choosing the same file re-fires change
+  var fi = document.getElementById("file-input");
+  if (fi) fi.value = "";
   openWorldModal(); // progress shows in the modal footer (drag&drop path too)
   var statusEl = document.getElementById("wm-status");
   if (!file.name.endsWith(".tar.gz")) {
@@ -821,6 +866,11 @@ function handleFile(file) {
       var uploadedWorld = res.world;
       loadWorlds(uploadedWorld);
       setTimeout(function() { closeWorldModal(); switchWorld(uploadedWorld + ".world"); }, 1500);
+    } else if (res.error === "exists") {
+      // Server kept the upload session — ask before replacing, no re-upload
+      var keptId = uploadId;
+      uploadId = null;   // a later cleanup() must not cancel the kept session
+      _wmOverwriteConfirm(res.world, keptId);
     } else {
       throw new Error(res.error || "Upload failed");
     }
@@ -963,6 +1013,10 @@ function _applyPoseLerp() {
       nq = s.q;
     }
     scene.updatePose(e, np, { x: nq.x, y: nq.y, z: nq.z, w: nq.w });
+    // Light-state overlays park deep underground when off — hide them there
+    // entirely (they peek out below field edges otherwise)
+    var om = name.match(/^(.+)_(yellow|red|gcover)$/);
+    if (om && _lightsCache[om[1]]) { e.visible = np.z > -0.5; }
     // Drop samples that can no longer be needed (keep one before rt).
     while (buf.length > 2 && buf[1].t <= rt) buf.shift();
   }
@@ -993,19 +1047,52 @@ var LAMP_COLORS = {
 
 function _applyLightVisuals() {
   Object.keys(_lightsCache).forEach(function(name) {
+    var l = _lightsCache[name];
     var model = scene.getByName(name);
-    var colors = LAMP_COLORS[(_lightsCache[name] || {}).state];
-    if (!model || !colors) { return; }
-    model.traverse(function(o) {
-      var c = colors[o.name];
-      if (!c) { return; }
-      o.traverse(function(m) {
-        if (m.material && m.material.color) {
-          m.material.color.set(c[0]);
-          if (m.material.emissive) { m.material.emissive.set(c[1] || '#000000'); }
-        }
+    var colors = LAMP_COLORS[(l || {}).state];
+    if (model && colors) {
+      model.traverse(function(o) {
+        var c = colors[o.name];
+        if (!c) { return; }
+        o.traverse(function(m) {
+          if (m.material && m.material.color) {
+            m.material.color.set(c[0]);
+            if (m.material.emissive) { m.material.emissive.set(c[1] || '#000000'); }
+          }
+        });
       });
-    });
+    }
+    _placeLightOverlays(name, l);
+  });
+}
+
+// 오버레이 즉시 배치 — gz 포즈 스트림은 ~1초 늦게 도착하므로, 상태를 안 순간
+// 클라이언트가 디스크를 직접 옮긴다 (램프 색칠과 같은 틱 → 패널과 완전 동기).
+// 잠시 _poseHold로 스트림을 무시하고, 이후 스트림이 같은 포즈를 보내와도
+// 시각 변화는 없다. 앵커(px/pz)는 /traffic_lights 응답의 panel 데이터.
+function _placeLightOverlays(name, l) {
+  var pn = l && l.panel;
+  if (!pn) { return; }
+  var states = { yellow: l.state === 'yellow', red: l.state === 'red', gcover: l.state !== 'green' };
+  var anchors = { yellow: { px: pn.px, pz: pn.pz }, red: pn.red, gcover: pn.green };
+  Object.keys(states).forEach(function(suffix) {
+    var a = anchors[suffix];
+    var o = scene.getByName(name + '_' + suffix);
+    if (!a || !o) { return; }
+    var on = states[suffix];
+    var wx = on ? l.x + Math.cos(l.yaw) * a.px : l.x;
+    var wy = on ? l.y + Math.sin(l.yaw) * a.px : l.y;
+    var wz = on ? a.pz : -50;
+    var key = wx.toFixed(4) + '|' + wy.toFixed(4) + '|' + wz.toFixed(4);
+    if (o.userData.pcOverlayKey === key) { return; }   // unchanged — leave stream alone
+    o.userData.pcOverlayKey = key;
+    var sy = Math.sin(l.yaw / 2), cy = Math.cos(l.yaw / 2);
+    var sp = Math.sin((pn.pitch || 0) / 2), cp = Math.cos((pn.pitch || 0) / 2);
+    o.position.set(wx, wy, wz);
+    o.quaternion.set(-sy * sp, cy * sp, cp * sy, cy * cp);  // qz(yaw) ⊗ qy(pitch)
+    o.visible = wz > -0.5;
+    delete _poseLerp[name + '_' + suffix];
+    _poseHold[name + '_' + suffix] = Date.now() + 2000;
   });
 }
 
@@ -1017,8 +1104,17 @@ function _scheduleLightPoll() {
   var names = Object.keys(_lightsCache);
   var delay = 5000;
   if (connected && names.length > 0) {
-    var anyYellow = names.some(function(n) { return _lightsCache[n].state === 'yellow'; });
-    delay = anyYellow ? 700 : 2500;
+    delay = 2500;
+    names.forEach(function(n) {
+      var l = _lightsCache[n];
+      if (l.state !== 'yellow') { return; }
+      // The server reports the seconds left in the yellow phase — poll right
+      // after that deadline so panel/lamp colors flip in step with the 3D
+      // overlays (which the server moves the instant yellow ends).
+      var wait = (typeof l.yellow_left === 'number')
+        ? Math.max(150, l.yellow_left * 1000 + 150) : 700;
+      delay = Math.min(delay, wait);
+    });
   }
   _lightPollTimer = setTimeout(function() { _refreshLights(_scheduleLightPoll); }, delay);
 }
@@ -1032,11 +1128,12 @@ function _resolveTarget(top, leaf) {
       name === currentWorld) {
     return null;
   }
-  // 노랑 오버레이(런타임 모델) 클릭 → 본체 신호등으로 승격
-  var ym = name.match(/^(.+)_yellow$/);
+  // 상태 오버레이(런타임 모델: yellow/red/gcover 디스크) 클릭 → 본체 신호등으로
+  // 승격 — 디스크가 독립 오브젝트로 선택/드래그되면 안 된다
+  var ym = name.match(/^(.+)_(yellow|red|gcover)$/);
   if (ym && _lightsCache[ym[1]]) {
     var stand = scene.getByName(ym[1]);
-    return stand ? { obj: stand, name: ym[1], kind: 'light' } : null;
+    return stand ? _lightTarget(stand, ym[1]) : null;
   }
   var marker = null;
   for (var i = 0; i < top.children.length; i++) {
@@ -1045,10 +1142,21 @@ function _resolveTarget(top, leaf) {
   }
   if (marker === 'wall') { return null; }        // 벽은 이동 불가 (WB와 동일)
   if (marker === 'light' || marker === 'signal' || _lightsCache[name]) {
-    return { obj: top, name: name, kind: 'light' }; // 단일 강체 — 램프는 링크 visual
+    return _lightTarget(top, name);              // 단일 강체 — 램프는 링크 visual
   }
   if (name === 'physicar') { return { obj: top, name: name, kind: 'vehicle' }; }
   return { obj: top, name: name, kind: 'object' };
+}
+
+// 신호등 선택 대상: 상태 오버레이 디스크들을 attachments로 실어 드래그/회전
+// 중에 본체와 강체로 함께 움직이게 한다 (안 실으면 옛 자리에 붕 떠서 남는다)
+function _lightTarget(stand, name) {
+  var att = [];
+  ['yellow', 'red', 'gcover'].forEach(function(sfx) {
+    var o = scene.getByName(name + '_' + sfx);
+    if (o) { att.push(o); }
+  });
+  return { obj: stand, name: name, kind: 'light', attachments: att };
 }
 
 function _onSelect(sel) {
@@ -1088,6 +1196,9 @@ function _commitPose(sel, pose) {
     release(); // 서버 적용 완료 — 다음 스트림 프레임부터 실제 포즈 반영
     if (!d.ok) {
       _showToast(d.error || "Move failed");
+    } else if (sel.kind === 'light') {
+      // 오버레이 디스크를 서버 확정 포즈로 즉시 재배치 (폴링까지 안 기다림)
+      _refreshLights(_scheduleLightPoll);
     }
   })
   .catch(function() { release(); _showToast("Move failed"); });

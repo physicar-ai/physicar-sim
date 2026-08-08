@@ -393,6 +393,33 @@ def _run_gz_cmd(*args, timeout=5):
         list(args), env=env, timeout=timeout, capture_output=True, text=True
     )
 
+# ── in-process gz-transport (fast path) ────────────────────────────────────
+# The `gz service` CLI spawns a process per call (~340 ms). The in-process
+# node answers in <1 ms once discovery is done, which is what makes traffic
+# light changes feel instant (a state change chains 3-5 service calls).
+# Partition must be set before the node is created.
+os.environ.setdefault("GZ_PARTITION", "physicar")
+try:
+    from gz.transport13 import Node as _GzTNode
+    from gz.msgs10.boolean_pb2 import Boolean as _PbBoolean
+    from gz.msgs10.pose_pb2 import Pose as _PbPose
+    from gz.msgs10.visual_pb2 import Visual as _PbVisual
+    _gz_node = _GzTNode()
+except Exception:
+    _gz_node = None
+_gz_node_lock = threading.Lock()
+
+def _gz_request(service, req, req_type, rep_type, timeout_ms=2000):
+    """In-process service request; None on failure (caller falls back to CLI)."""
+    if _gz_node is None:
+        return None
+    try:
+        with _gz_node_lock:
+            ok, rep = _gz_node.request(service, req, req_type, rep_type, timeout_ms)
+        return rep if ok else None
+    except Exception:
+        return None
+
 # ── live gz stream cache (poses + clock) ───────────────────────────────────
 # /pose and /objects used to spawn a `gz topic -e -n 1` process per request
 # (~160 ms each). Persistent readers stream the topics into memory instead,
@@ -671,12 +698,20 @@ _yellow_timers = {}               # name -> threading.Timer
 _lights = {}            # name -> {"x", "y", "yaw", "state"} — 월드 정의 신호등만
 _lights_world = None    # world the registry belongs to
 
-# 상태 표시 계약 — visual_config 색 변경 (스크린 패널 모델 폐지, 2026-07-14):
-# 신호등은 월드 모델 단일 강체. 스탠드 link "light"의 lamp_red/lamp_yellow/lamp_green
-# visual 색을 /world/<w>/visual_config 서비스로 갈아끼운다 → 차량 카메라(서버 렌더)에
-# 반영. 웹 뷰어는 같은 상태를 REST로 읽어 three.js 재질을 직접 칠한다 (gzweb.js).
-# 구 월드(lamp_yellow 없음): 해당 visual_config만 실패 — 노랑 경유가 "양쪽 소등"으로
-# 보이는 폴백이 된다 (3초 뒤 빨강 점등).
+# 상태 표시 계약 — 오버레이 포즈-스왑 (2026-08-08 개편):
+# visual_config 재질 변경은 서비스가 true를 돌려주면서도 서버 센서 씬(차량
+# 카메라)에 반영되지 않는다 (실측: scene/info 재질도 불변 — 런타임 조명 무시와
+# 같은 계열). 그래서 카메라에 보이는 상태는 전부 "포즈 스트리밍이 되는 non-static
+# 오버레이 모델"로 표현한다 (노랑 오버레이와 동일 기법, 실측 검증):
+#   <name>_yellow — 밝은 노랑 디스크 (yellow 상태에 패널 중앙)
+#   <name>_red    — 밝은 빨강 디스크 (red 상태에 lamp_red 앞)
+#   <name>_gcover — 어두운 초록 디스크 (green이 아닐 때 lamp_green을 덮음 —
+#                    월드 SDF의 기본 램프가 "초록 점등"으로 구워져 있기 때문)
+# 램프 위치/반지름은 월드 SDF의 lamp_red/lamp_green visual에서 읽는다. 이 visual이
+# 없는 구 월드는 오버레이를 못 만들므로 visual_config 폴백만 남는다 (카메라 미반영).
+# 웹 뷰어는 상태를 REST로 읽어 three.js 재질을 직접 칠한다 (gzweb.js).
+# visual_config 호출은 유지한다 — 지금은 무해한 no-op이고, GUI 클라이언트나
+# 이후 gz 버전에서 동작하면 기본 램프 색까지 일치시켜 준다.
 _LAMP_COLORS = {
     # state -> {visual: (ambient/diffuse rgb, emissive rgb|None)}
     # 노랑은 visual이 아니라 오버레이 모델(<name>_yellow, 포즈-스왑)이 담당 —
@@ -694,7 +729,8 @@ _LAMP_COLORS = {
         "lamp_green": ("0 1 0", "0 0.5 0"),
     },
 }
-_OVERLAY_HIDDEN_Z = -1.0  # 노랑 오버레이 OFF: 지하
+_OVERLAY_HIDDEN_Z = -50.0  # 오버레이 OFF 대기 위치 — 필드 가장자리 밖 시점에서도
+                           # 안 보이게 깊이 내린다 (뷰어는 지하 오버레이를 아예 숨김)
 
 # visual_config 는 스코프드 네임을 받지 않는다 (UserCommands VisualCommand:
 # ① msg.id(엔티티 ID) ② parent_name(링크 Name 전역 검색) + name(visual 평이름)).
@@ -741,20 +777,38 @@ def _scan_visual_ids(world):
     logging.info("visual ids scanned: %d entries", len(_visual_ids))
 
 def _set_visual_material(world, model, visual, rgb, emissive):
-    """visual_config 유저 커맨드로 visual 재질 색 변경 (센서 카메라·GUI 공유 씬 반영)."""
+    """visual_config 유저 커맨드 — 서비스는 true를 주지만 센서 씬에는 반영되지
+    않는다 (실측). 호환용 best-effort로만 호출된다."""
     vid = _visual_ids.get((model, visual))
     if vid is None:
         _scan_visual_ids(world)
         vid = _visual_ids.get((model, visual))
+    r_, g_, b_ = [float(t) for t in rgb.split()]
+    er, eg, eb = [float(t) for t in (emissive or "0 0 0").split()]
+    if _gz_node is not None:
+        try:
+            v = _PbVisual()
+            if vid is not None:
+                v.id = vid
+            else:
+                # 폴백: 링크명 전역 검색 — 신호등이 하나뿐인 월드에서만 정확
+                v.name = visual
+                v.parent_name = "light"
+            m = v.material
+            m.ambient.r, m.ambient.g, m.ambient.b, m.ambient.a = r_, g_, b_, 1.0
+            m.diffuse.CopyFrom(m.ambient)
+            m.emissive.r, m.emissive.g, m.emissive.b, m.emissive.a = er, eg, eb, 1.0
+            rep = _gz_request(f"/world/{world}/visual_config", v, _PbVisual, _PbBoolean)
+            if rep is not None:
+                return bool(rep.data)
+        except Exception:
+            pass
     if vid is not None:
         sel = f'id: {vid}'
     else:
-        # 폴백: 링크명 전역 검색 — 신호등이 하나뿐인 월드에서만 정확
         sel = f'name: "{visual}", parent_name: "light"'
-    r_, g_, b_ = rgb.split()
     mat = (f'ambient: {{r: {r_}, g: {g_}, b: {b_}, a: 1}}, '
            f'diffuse: {{r: {r_}, g: {g_}, b: {b_}, a: 1}}')
-    er, eg, eb = (emissive or "0 0 0").split()
     mat += f', emissive: {{r: {er}, g: {eg}, b: {eb}, a: 1}}'
     try:
         r = _run_gz_cmd("gz", "service", "-s", f"/world/{world}/visual_config",
@@ -770,38 +824,73 @@ def _set_visual_material(world, model, visual, rgb, emissive):
         logging.warning("visual_config error: %s/%s (%s)", model, visual, e)
         return False
 
-def _overlay_pose(sig, on):
-    """노랑 오버레이 월드 포즈 — ON: 화면 앞 0.4mm 중앙, OFF: 지하."""
-    pn = sig.get("panel")
-    if not on or not pn:
+# suffix -> (panel anchor key | None=패널 중앙, ambient/diffuse rgb, emissive rgb)
+_OVERLAY_SPECS = {
+    "yellow": (None, "1 0.8 0", "0.5 0.4 0"),
+    "red": ("red", "1 0 0", "0.5 0 0"),
+    "gcover": ("green", "0 0.07 0", "0 0 0"),
+}
+
+def _overlay_states(state):
+    """suffix -> ON? — 기본 램프가 '초록 점등'으로 구워져 있다는 전제의 상태표."""
+    return {
+        "yellow": state == "yellow",
+        "red": state == "red",
+        "gcover": state != "green",
+    }
+
+def _overlay_anchor(pn, suffix):
+    """오버레이의 모델-로컬 앵커 {px, pz, r} — 없으면 None (구 월드)."""
+    key = _OVERLAY_SPECS[suffix][0]
+    if key is None:
+        return {"px": pn["px"], "pz": pn["pz"], "r": pn["lamp_r"]}
+    return pn.get(key)
+
+def _overlay_pose_at(sig, anchor, on):
+    """오버레이 월드 포즈 — ON: 앵커 위치, OFF: 지하."""
+    if not on:
         return sig["x"], sig["y"], _OVERLAY_HIDDEN_Z
-    wx = sig["x"] + math.cos(sig["yaw"]) * pn["px"]
-    wy = sig["y"] + math.sin(sig["yaw"]) * pn["px"]
-    return wx, wy, pn["pz"]
+    wx = sig["x"] + math.cos(sig["yaw"]) * anchor["px"]
+    wy = sig["y"] + math.sin(sig["yaw"]) * anchor["px"]
+    return wx, wy, anchor["pz"]
 
 def _apply_light_state(world, name, sig):
-    """램프 visual 색 변경 + 노랑 오버레이 포즈-스왑 (앱과 동일한 겹침 문법)."""
+    """오버레이 포즈-스왑이 카메라에 보이는 진실. visual_config는 호환용."""
     ok = True
+    pn = sig.get("panel")
+    if pn:
+        on = _overlay_states(sig["state"])
+        for suffix in _OVERLAY_SPECS:
+            anchor = _overlay_anchor(pn, suffix)
+            if not anchor:
+                continue
+            wx, wy, wz = _overlay_pose_at(sig, anchor, on[suffix])
+            ok = _set_entity_pose(world, f"{name}_{suffix}", wx, wy, wz,
+                                  sig["yaw"], pn["pitch"]) and ok
     for lamp, (rgb, emissive) in _LAMP_COLORS[sig["state"]].items():
-        ok = _set_visual_material(world, name, lamp, rgb, emissive) and ok
-    if sig.get("panel"):
-        wx, wy, wz = _overlay_pose(sig, sig["state"] == "yellow")
-        ok = _set_entity_pose(world, f"{name}_yellow", wx, wy, wz,
-                              sig["yaw"], sig["panel"]["pitch"]) and ok
+        _set_visual_material(world, name, lamp, rgb, emissive)
     return ok
 
-def _spawn_yellow_overlay(world, name, sig):
-    """노랑 오버레이 모델 스폰 (라이트당 1개, 평상시 지하 — non-static이라
-    포즈가 스트리밍되어 뷰어에도 자동 반영, 서버 카메라 렌더 포함)."""
+def _spawn_light_overlays(world, name, sig):
+    """상태 오버레이 모델 스폰 (라이트당 최대 3개: yellow/red/gcover, 평상시
+    지하 — non-static이라 포즈가 스트리밍되어 뷰어와 서버 카메라 렌더 모두에
+    반영된다. 램프 재질은 visual_config로 못 바꾸므로 이 포즈-스왑이 유일하게
+    카메라에 보이는 상태 표현이다)."""
     pn = sig.get("panel")
     if not pn:
         return
     os.makedirs(_OVERLAY_SDF_DIR, exist_ok=True)
-    path = os.path.join(_OVERLAY_SDF_DIR, f"{name}_yellow.sdf")
-    with open(path, "w") as f:
-        f.write(f"""<?xml version="1.0"?>
+    on = _overlay_states(sig["state"])
+    for suffix, (_key, rgb, emissive) in _OVERLAY_SPECS.items():
+        anchor = _overlay_anchor(pn, suffix)
+        if not anchor:
+            continue   # old worlds without lamp_red/lamp_green visuals
+        model = f"{name}_{suffix}"
+        path = os.path.join(_OVERLAY_SDF_DIR, f"{model}.sdf")
+        with open(path, "w") as f:
+            f.write(f"""<?xml version="1.0"?>
 <sdf version="1.7">
-<model name="{name}_yellow">
+<model name="{model}">
   <static>false</static>
   <link name="link">
     <gravity>false</gravity>
@@ -815,26 +904,26 @@ def _spawn_yellow_overlay(world, name, sig):
     </inertial>
     <visual name="lamp">
       <pose>0 0 0 0 1.5708 0</pose>
-      <geometry><cylinder><radius>{pn["lamp_r"]}</radius><length>0.0015</length></cylinder></geometry>
-      <material><ambient>1 0.8 0 1</ambient><diffuse>1 0.8 0 1</diffuse><emissive>0.5 0.4 0 1</emissive></material>
+      <geometry><cylinder><radius>{anchor["r"]}</radius><length>0.0015</length></cylinder></geometry>
+      <material><ambient>{rgb} 1</ambient><diffuse>{rgb} 1</diffuse><emissive>{emissive} 1</emissive></material>
     </visual>
   </link>
 </model>
 </sdf>
 """)
-    wx, wy, wz = _overlay_pose(sig, sig["state"] == "yellow")
-    try:
-        r = _run_gz_cmd("gz", "service", "-s", f"/world/{world}/create",
-                        "--reqtype", "gz.msgs.EntityFactory",
-                        "--reptype", "gz.msgs.Boolean",
-                        "--timeout", "5000",
-                        "--req", f'sdf_filename: "{path}", name: "{name}_yellow", '
-                                 f'pose: {{{_pose_fields(wx, wy, wz, sig["yaw"], pn["pitch"])}}}')
-        if r.returncode != 0 or "true" not in r.stdout:
-            # 같은 월드 재스캔이면 이미 존재 — 위치만 맞춘다
-            _set_entity_pose(world, f"{name}_yellow", wx, wy, wz, sig["yaw"], pn["pitch"])
-    except Exception as e:
-        logging.warning("yellow overlay spawn failed: %s (%s)", name, e)
+        wx, wy, wz = _overlay_pose_at(sig, anchor, on[suffix])
+        try:
+            r = _run_gz_cmd("gz", "service", "-s", f"/world/{world}/create",
+                            "--reqtype", "gz.msgs.EntityFactory",
+                            "--reptype", "gz.msgs.Boolean",
+                            "--timeout", "5000",
+                            "--req", f'sdf_filename: "{path}", name: "{model}", '
+                                     f'pose: {{{_pose_fields(wx, wy, wz, sig["yaw"], pn["pitch"])}}}')
+            if r.returncode != 0 or "true" not in r.stdout:
+                # 같은 월드 재스캔이면 이미 존재 — 위치만 맞춘다
+                _set_entity_pose(world, model, wx, wy, wz, sig["yaw"], pn["pitch"])
+        except Exception as e:
+            logging.warning("light overlay spawn failed: %s (%s)", model, e)
 
 # ── Scene brightness factor (presentation layer) ───────────────────────────
 # The gz sensor render scene ignores runtime light changes (verified: even
@@ -880,6 +969,21 @@ def _pose_fields(x, y, z, yaw, pitch=0.0):
             f'orientation: {{x: {qx:.6f}, y: {qy:.6f}, z: {qz:.6f}, w: {qw:.6f}}}')
 
 def _set_entity_pose(world, name, x, y, z, yaw, pitch=0.0):
+    if _gz_node is not None:
+        try:
+            p = _PbPose()
+            p.name = name
+            p.position.x, p.position.y, p.position.z = x, y, z
+            sy, cy = math.sin(yaw / 2), math.cos(yaw / 2)
+            sp, cp = math.sin(pitch / 2), math.cos(pitch / 2)
+            # q = qz(yaw) ⊗ qy(pitch) — same math as _pose_fields
+            p.orientation.x, p.orientation.y = -sy * sp, cy * sp
+            p.orientation.z, p.orientation.w = cp * sy, cy * cp
+            rep = _gz_request(f"/world/{world}/set_pose", p, _PbPose, _PbBoolean)
+            if rep is not None:
+                return bool(rep.data)
+        except Exception:
+            pass
     try:
         r = _run_gz_cmd("gz", "service", "-s", f"/world/{world}/set_pose",
                         "--reqtype", "gz.msgs.Pose",
@@ -900,9 +1004,15 @@ def _move_light(world, name, x, y, yaw):
         sig = dict(sig, x=round(x, 6), y=round(y, 6), yaw=round(yaw, 6))
         _lights[name] = sig
     ok = _set_entity_pose(world, name, x, y, 0.0, yaw)
-    if sig.get("panel"):
-        wx, wy, wz = _overlay_pose(sig, sig["state"] == "yellow")
-        _set_entity_pose(world, f"{name}_yellow", wx, wy, wz, sig["yaw"], sig["panel"]["pitch"])
+    pn = sig.get("panel")
+    if pn:
+        on = _overlay_states(sig["state"])
+        for suffix in _OVERLAY_SPECS:
+            anchor = _overlay_anchor(pn, suffix)
+            if not anchor:
+                continue
+            wx, wy, wz = _overlay_pose_at(sig, anchor, on[suffix])
+            _set_entity_pose(world, f"{name}_{suffix}", wx, wy, wz, sig["yaw"], pn["pitch"])
     return ok, sig, (None if ok else "pose change failed")
 
 def _set_light_target(world, name, target):
@@ -917,6 +1027,12 @@ def _set_light_target(world, name, target):
             return True, sig, None
         via_yellow = (sig["state"] == "green" and target == "red")
         sig = dict(sig, state="yellow" if via_yellow else target)
+        if via_yellow:
+            # Clients schedule their next poll right after this deadline so
+            # panel/lamp colors flip in step with the 3D overlays.
+            sig["yellow_until"] = round(time.time() + YELLOW_S, 3)
+        else:
+            sig.pop("yellow_until", None)
         _lights[name] = sig
     if not _apply_light_state(world, name, sig):
         return False, sig, "state change failed"
@@ -934,6 +1050,7 @@ def _finish_yellow(world, name, target):
         if sig is None or sig["state"] != "yellow":
             return
         sig = dict(sig, state=target)
+        sig.pop("yellow_until", None)
         _lights[name] = sig
     _apply_light_state(world, name, sig)
     logging.info("light %s: yellow -> %s", name, target)
@@ -975,10 +1092,23 @@ def _scan_world_lights(world):
             if len(parts) >= 6:
                 x, y, yaw = float(parts[0]), float(parts[1]), float(parts[5])
         # 자기기술 계약: screen visual의 pose(pitch=-tilt)/size → 노랑 오버레이 배치
-        # (지름 = min(가로×0.98, 세로×0.41) — 앱과 동일, 화면 앞 0.4mm)
+        # (지름 = min(가로×0.98, 세로×0.41) — 앱과 동일, 화면 앞 0.4mm).
+        # lamp_red/lamp_green visual의 로컬 pose/반지름 → 빨강/초록커버 오버레이 앵커.
         panel = None
+        lamps = {}
         for v in sig_link.findall("visual"):
-            if v.get("name") != "screen":
+            nm = v.get("name")
+            if nm in ("lamp_red", "lamp_green"):
+                try:
+                    vp = [float(t) for t in (v.findtext("pose") or "0 0 0 0 0 0").split()]
+                    rad = float(v.findtext(".//cylinder/radius") or 0)
+                    ln = float(v.findtext(".//cylinder/length") or 0.0015)
+                    if rad > 0:
+                        lamps[nm] = {"lx": vp[0], "lz": vp[2], "r": round(rad, 5), "len": ln}
+                except Exception:
+                    pass
+                continue
+            if nm != "screen" or panel is not None:
                 continue
             try:
                 vp = [float(t) for t in (v.findtext("pose") or "0 0 0 0 0 0").split()]
@@ -993,7 +1123,26 @@ def _scan_world_lights(world):
                 }
             except Exception:
                 panel = None
-            break
+        if panel:
+            tilt = -panel["pitch"]
+            for key, lm in (("red", lamps.get("lamp_red")), ("green", lamps.get("lamp_green"))):
+                if not lm:
+                    continue
+                doff = lm["len"] / 2 + 0.0015 / 2 + 0.0004  # 램프 앞 0.4mm + 디스크 절반
+                panel[key] = {
+                    "px": round(lm["lx"] + math.cos(tilt) * doff, 6),
+                    "pz": round(lm["lz"] + math.sin(tilt) * doff, 6),
+                    "r": lm["r"],
+                }
+            # 노랑 디스크는 패널 중앙에 떠서 램프 커버 디스크들과 세로로 겹친다.
+            # 커버는 (기울어진) 패널 면에서 법선으로 ~3mm 떠 있으므로, 노랑을
+            # 법선 방향으로 +3mm 더 밀어 겹침 구간에서 항상 커버 앞에 오게 한다.
+            # (램프의 로컬 x를 그대로 비교하면 안 된다 — 기울어진 판에서는 낮은
+            # 램프일수록 x가 클 뿐, 면에서 떨어져 있는 게 아니다.)
+            if "red" in panel or "green" in panel:
+                extra = 0.003
+                panel["px"] = round(panel["px"] + math.cos(tilt) * extra, 6)
+                panel["pz"] = round(panel["pz"] + math.sin(tilt) * extra, 6)
         with _lock:
             existing = _lights.get(name)
             prev_state = existing["state"] if existing else "green"
@@ -1009,7 +1158,7 @@ def _scan_world_lights(world):
             _lights[name] = sig
         seen.add(name)
         logging.info("world light registered: %s", name)
-        _spawn_yellow_overlay(world, name, sig)
+        _spawn_light_overlays(world, name, sig)
         # 익스포트 SDF는 초록 점등으로 구워져 있음 — 보존 상태가 다르면 색 복원
         if sig["state"] != "green":
             _apply_light_state(world, name, sig)
@@ -1384,7 +1533,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif self.path == "/traffic_lights":
             with _lock:
                 world = _current_world
-                items = [{"name": n, **s} for n, s in sorted(_lights.items())]
+                now = time.time()
+                items = []
+                for n, s in sorted(_lights.items()):
+                    d = {"name": n, **s}
+                    u = d.pop("yellow_until", None)
+                    if u is not None:
+                        # remaining seconds, not an absolute time — immune to
+                        # client/server clock skew
+                        d["yellow_left"] = round(max(0.0, u - now), 3)
+                    items.append(d)
             self._json(200, {"world": world, "lights": items})
         elif self.path == "/overlay":
             text = _overlay_text if time.monotonic() < _overlay_expiry else ""
@@ -1442,7 +1600,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             _fail_count = 0
             threading.Thread(target=start_sim, args=(world_file,), daemon=True).start()
             self._json(200, {"ok": True, "world": world_file})
-        elif self.path == "/upload":
+        elif self.path.split("?", 1)[0] == "/upload":
             content_type = self.headers.get("Content-Type", "")
             content_length = int(self.headers.get("Content-Length", 0))
             if content_length > MAX_UPLOAD_SIZE:
@@ -1493,7 +1651,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if world_name in PROTECTED_NAMES:
                     self._json(403, {"error": f"cannot overwrite protected world: {world_name}"})
                     return
-                if os.path.isfile(os.path.join(WORLDS_DIR, f"{world_name}.world")):
+                exists = os.path.isfile(os.path.join(WORLDS_DIR, f"{world_name}.world"))
+                overwrite = "overwrite=1" in (self.path.split("?", 1) + [""])[1]
+                if exists and not overwrite:
+                    # Duplicate name: never replace silently. The client asks the
+                    # user and re-uploads with ?overwrite=1.
+                    self._json(409, {"error": "exists", "world": world_name})
+                    return
+                if exists:
                     _delete_world_files(world_name)
                 _extract_world(tmp_path, world_name)
                 self._json(200, {"ok": True, "world": world_name})
@@ -1562,6 +1727,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._json(404, {"error": "upload session not found"})
                 return
             tmp_path = session["path"]
+            keep_session = False
             try:
                 ok, err, world_name = _validate_tar(tmp_path)
                 if not ok:
@@ -1570,7 +1736,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if world_name in PROTECTED_NAMES:
                     self._json(403, {"error": f"cannot overwrite protected world: {world_name}"})
                     return
-                if os.path.isfile(os.path.join(WORLDS_DIR, f"{world_name}.world")):
+                exists = os.path.isfile(os.path.join(WORLDS_DIR, f"{world_name}.world"))
+                if exists and not body.get("overwrite"):
+                    # Duplicate name: never replace silently. Keep the uploaded
+                    # file so the client can confirm and re-complete with
+                    # {"overwrite": true} (or /upload/cancel) — no re-upload.
+                    keep_session = True
+                    with _upload_lock:
+                        if upload_id in _upload_sessions:
+                            _upload_sessions[upload_id]["last_activity"] = time.time()
+                    self._json(409, {"error": "exists", "world": world_name})
+                    return
+                if exists:
                     _delete_world_files(world_name)
                 _extract_world(tmp_path, world_name)
                 logging.info("upload complete: %s -> %s", upload_id, world_name)
@@ -1581,13 +1758,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 logging.exception("upload complete failed: %s", upload_id)
                 self._json(500, {"error": f"import failed: {type(e).__name__}: {e}"})
             finally:
-                try:
-                    os.unlink(tmp_path)
-                except Exception:
-                    pass
-                with _upload_lock:
-                    if upload_id in _upload_sessions:
-                        del _upload_sessions[upload_id]
+                if not keep_session:
+                    try:
+                        os.unlink(tmp_path)
+                    except Exception:
+                        pass
+                    with _upload_lock:
+                        if upload_id in _upload_sessions:
+                            del _upload_sessions[upload_id]
         elif self.path == "/upload/cancel":
             # Chunked upload: cancel and cleanup
             length = int(self.headers.get("Content-Length", 0))

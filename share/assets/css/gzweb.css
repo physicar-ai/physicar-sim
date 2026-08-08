@@ -102,7 +102,7 @@ body { background: #1a1a2e; color: #eee; font-family: sans-serif; overflow: hidd
 
 /* Traffic light control panel — 신호등 클릭 시 우측에 세로 신호등 표시.
    원격 신호등 앱과 동일 문법: 꺼진 불 클릭 = 전환, 노랑은 중앙 겹침(z2). */
-#light-panel { display: none; position: fixed; top: 50%; right: calc(var(--u)*0.6); transform: translateY(-50%);
+#light-panel { display: none; position: fixed; bottom: calc(var(--u)*0.6); right: calc(var(--u)*0.6);
                z-index: 20; background: rgba(20,20,40,0.92); border: 1px solid #555;
                border-radius: calc(var(--u)*0.6); padding: calc(var(--u)*0.5);
                max-height: calc(100vh - 16px); }
@@ -115,8 +115,8 @@ body { background: #1a1a2e; color: #eee; font-family: sans-serif; overflow: hidd
 #light-panel .lp-close:hover { color: #fff; }
 .lp-lights { position: relative; aspect-ratio: 1 / 2; width: auto;
              /* 임베드 iframe이 낮아도 잘리지 않게 — 뷰포트에 맞춰 축소 (램프는 % 배치라 비례 축소) */
-             height: min(calc(var(--u)*13), calc(100vh - 80px));
-             min-height: calc(var(--u)*6);
+             height: min(calc(var(--u)*10), calc(100vh - 80px));
+             min-height: calc(var(--u)*5);
              background: #000; border-radius: calc(var(--u)*0.7); }
 .lp-lamp { position: absolute; left: 50%; transform: translateX(-50%);
            height: 41%; aspect-ratio: 1; border-radius: 50%; }
@@ -205,3 +205,12 @@ body { background: #1a1a2e; color: #eee; font-family: sans-serif; overflow: hidd
 .mh-card svg { display: block; width: 100%; height: auto; }
 .mh-tip { text-align: center; color: #778; font-size: calc(var(--u)*0.77);
           padding-top: calc(var(--u)*0.3); }
+
+/* Inline overwrite-confirm buttons in the world-modal status row */
+#wm-status .wm-ow { margin-left: calc(var(--u)*0.45); padding: 1px calc(var(--u)*0.7);
+                    border-radius: calc(var(--u)*0.3); border: 1px solid #555;
+                    background: #2a2a4a; color: #eee; font-size: calc(var(--u)*0.75);
+                    cursor: pointer; }
+#wm-status .wm-ow:hover { border-color: #888; }
+#wm-status .wm-ow.danger { background: #7f1d1d; border-color: #b91c1c; }
+#wm-status .wm-ow.danger:hover { background: #991b1b; }
