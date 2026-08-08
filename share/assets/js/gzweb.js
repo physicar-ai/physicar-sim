@@ -325,18 +325,19 @@ function connect() {
       }
     }
     
-    var sceneRetryCount = 0;
     function handleSceneWithRetry(_sceneInfo) {
       handleScene(_sceneInfo);
-      if (_sceneInfo.model.length === 0 && sceneRetryCount < 5) {
-        sceneRetryCount++;
+      // Keep asking while the scene comes back empty — a world can take 15s+
+      // to boot after a switch, far longer than any fixed retry budget. The
+      // old 5x2s cap gave up and left the viewer as an empty sky until a
+      // manual page reload. Every world has models eventually (sun at
+      // least), so this loop always terminates.
+      if (_sceneInfo.model.length === 0) {
         setTimeout(function() {
           if (connected && gz && gz.socket && gz.socket.readyState === 1) {
             gz.socket.send(buildMsg(["scene", currentWorld, "", ""]));
           }
-        }, 2000);
-      } else {
-        sceneRetryCount = 0;
+        }, 3000);
       }
     }
     
@@ -427,49 +428,152 @@ function init() {
   cam.near = 0.2; cam.far = 2000; cam.updateProjectionMatrix();
   scene.scene.fog = null;
 
-  // ── 바닥 데칼 z-fighting 방어 ──
-  // 트랙은 z=0 부근에 0.1~1.5mm 간격으로 겹친 얇은 면들(필드→도로→라인)이라
-  // 깊이 정밀도가 흔들리는 순간 아래층(회색)이 위로 올라온다. 얇고 낮은 메시를
-  // 찾아 z 순서대로 polygonOffset 을 부여 — 위층이 항상 이기게 (각도·거리 무관).
-  // 월드 전환/리스폰으로 메시가 다시 생기므로 주기적으로 재적용 (플래그로 멱등).
-  function applyDecalOffsets() {
+  // Ground-stack separation WITHOUT polygonOffset. The old offset pass made
+  // fragments vanish wholesale on Windows/ANGLE at oblique angles (offset
+  // scales with the on-screen depth slope). Instead, physically lift the
+  // track's decal layers apart: sort the thin flat track meshes by their
+  // baked z and give each layer a real 0.5mm step via mesh.position.z.
+  // Sub-mm gaps in the exports (road 0.1mm over field, lines 0.03mm over
+  // road) are below depth precision at a distance and shimmer otherwise.
+  // Track meshes sit at the world origin with identity transforms; anything
+  // positioned elsewhere (vehicle, cones, handles) is left alone.
+  function applyDecalLift() {
     try {
       var flats = [];
+      var wp = new THREE.Vector3();
       scene.scene.traverse(function (o) {
-        if (!o.isMesh || !o.material || o.material._pcDecal) return;
+        if (!o.isMesh || !o.geometry || !o.material || Array.isArray(o.material)) return;
+        if (o.renderOrder > 900) return;                      // UI overlays
+        var g = o.geometry;
+        if (!g.boundingBox) g.computeBoundingBox();
+        var bb = g.boundingBox;
+        if (!bb) return;
+        var h = bb.max.z - bb.min.z;
+        var area = (bb.max.x - bb.min.x) * (bb.max.y - bb.min.y);
+        if (h >= 0.01 || area < 0.05) return;
+        if (bb.min.z < -0.1 || bb.min.z > 0.05) return;
+        o.getWorldPosition(wp);
+        wp.z -= o.position.z;                                 // ignore our own lift
+        if (Math.abs(wp.x) > 0.01 || Math.abs(wp.y) > 0.01 || Math.abs(wp.z) > 0.01) return;
+        flats.push({ o: o, z: bb.min.z, area: area });
+      });
+      if (flats.length < 2) return;
+      flats.sort(function (a, b) { return (a.z - b.z) || (b.area - a.area); });
+      var base = flats[0].z;
+      flats.forEach(function (f, i) {
+        var lift = (base + i * 0.0005) - f.z;
+        if (Math.abs(f.o.position.z - lift) > 1e-6) f.o.position.z = lift;
+      });
+    } catch (e) { /* 방어적 — 뷰어 본연 동작엔 영향 금지 */ }
+  }
+
+  // Max anisotropic filtering on every texture. At oblique view angles the
+  // GPU falls back to deep mip levels; with anisotropy=1 (three.js default)
+  // the ground textures smear into a gray mush — grass turned gray-white,
+  // road decals shredded, the start line bled into a wide white band.
+  function applyTextureAniso() {
+    try {
+      var max = scene.renderer.capabilities.getMaxAnisotropy();
+      scene.scene.traverse(function (o) {
+        if (!o.isMesh || !o.material) return;
+        var mats = Array.isArray(o.material) ? o.material : [o.material];
+        mats.forEach(function (m) {
+          if (m.map && m.map.anisotropy !== max) {
+            m.map.anisotropy = max;
+            m.map.needsUpdate = true;
+          }
+        });
+      });
+    } catch (e) { /* 방어적 */ }
+  }
+  function _groundUpkeep() { applyDecalLift(); applyTextureAniso(); }
+  setTimeout(_groundUpkeep, 3000);
+  setInterval(_groundUpkeep, 5000);
+  cam.position.x = 0; cam.position.y = -1.2; cam.position.z = 0.6;
+  cam.up.set(0, 0, 1);
+  cam.lookAt(new THREE.Vector3(0, 0, 0.1));
+  animate();
+
+  // ── F12 diagnostics (window.pcDebug / pcHide / pcShow, Alt+click probe) ──
+  // The gray-floor reports could never be reproduced on our side; these
+  // helpers let the affected browser tell us what IT is actually rendering.
+  (function () {
+    function _objName(o) {
+      var n = o.name, p = o.parent;
+      while (!n && p) { n = p.name; p = p.parent; }
+      return n || "?";
+    }
+    window.pcDebug = function () {
+      var gl = scene.renderer.getContext();
+      var cam = scene.camera;
+      var flats = [];
+      scene.scene.traverse(function (o) {
+        if (!o.isMesh || !o.material || Array.isArray(o.material)) return;
         var g = o.geometry;
         if (!g) return;
         if (!g.boundingBox) g.computeBoundingBox();
         var bb = g.boundingBox;
         if (!bb) return;
-        // 월드 z 로 판정 (트랙 메시는 변환이 항등이라 로컬≈월드)
-        var h = bb.max.z - bb.min.z;
-        if (h < 0.01 && bb.min.z > -0.1 && bb.min.z < 0.05) flats.push({ o: o, z: bb.min.z });
+        if (bb.max.z - bb.min.z < 0.01 && bb.min.z > -0.1 && bb.min.z < 0.05) {
+          var m = o.material;
+          flats.push(_objName(o) + " z=" + bb.min.z.toFixed(4)
+            + " lift=" + o.position.z.toFixed(4) + " dw=" + m.depthWrite
+            + " ro=" + o.renderOrder
+            + " aniso=" + (m.map ? m.map.anisotropy : "-"));
+        }
       });
-      if (!flats.length) return;
-      flats.sort(function (a, b) { return a.z - b.z; });
-      flats.forEach(function (f, i) {
-        var m = f.o.material;
-        m.polygonOffset = true;
-        // 아래층일수록 뒤로 밀림 (인덱스 역순) — 최상층이 0
-        m.polygonOffsetFactor = (flats.length - 1 - i);
-        m.polygonOffsetUnits = (flats.length - 1 - i) * 2;
-        m._pcDecal = true;
-        m.needsUpdate = true;
-      });
-    } catch (e) { /* 방어적 — 뷰어 본연 동작엔 영향 금지 */ }
-  }
-  setTimeout(applyDecalOffsets, 3000);
-  setInterval(applyDecalOffsets, 5000);
-  cam.position.x = 0; cam.position.y = -1.2; cam.position.z = 0.6;
-  cam.up.set(0, 0, 1);
-  cam.lookAt(new THREE.Vector3(0, 0, 0.1));
-  animate();
-  function checkNarrow() {
-    document.body.classList.toggle("narrow", window.innerWidth < 600);
-  }
-  checkNarrow();
-  window.addEventListener("resize", function() { scene.setSize(el.clientWidth, el.clientHeight); checkNarrow(); });
+      var d = {
+        DEPTH_BITS: gl.getParameter(gl.DEPTH_BITS),
+        contextLost: gl.isContextLost(),
+        dpr: window.devicePixelRatio,
+        cam: { pos: cam.position.toArray().map(function (v) { return +v.toFixed(3); }),
+               near: cam.near, far: cam.far, fov: cam.fov, aspect: +cam.aspect.toFixed(3) },
+        renderer: scene.renderer.info.render,
+        meshes: (function () { var n = 0; scene.scene.traverse(function (o) { if (o.isMesh) n++; }); return n; })(),
+        flats: flats,
+      };
+      console.log("[pcDebug]", JSON.stringify(d, null, 1));
+      return d;
+    };
+    window.pcHide = function (name) {
+      var n = 0;
+      scene.scene.traverse(function (o) { if (_objName(o) === name && o.isMesh) { o.visible = false; n++; } });
+      console.log("[pcHide]", name, n, "meshes hidden");
+      return n;
+    };
+    window.pcShow = function (name) {
+      var n = 0;
+      scene.scene.traverse(function (o) { if (_objName(o) === name && o.isMesh) { o.visible = true; n++; } });
+      console.log("[pcShow]", name, n, "meshes shown");
+      return n;
+    };
+    el.addEventListener("pointerdown", function (e) {
+      if (!e.altKey) return;
+      var r = el.getBoundingClientRect();
+      var ndc = new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1,
+                                  -((e.clientY - r.top) / r.height) * 2 + 1);
+      var ray = new THREE.Raycaster();
+      ray.setFromCamera(ndc, scene.camera);
+      var hits = ray.intersectObjects(scene.scene.children, true)
+        .filter(function (h) { return h.object.visible; }).slice(0, 6)
+        .map(function (h) {
+          var m = h.object.material && (Array.isArray(h.object.material) ? h.object.material[0] : h.object.material);
+          return _objName(h.object) + "@" + h.distance.toFixed(2)
+            + (m ? " [" + m.type + " dw=" + m.depthWrite + "]" : "");
+        });
+      console.log("[pcPick]", hits.join("  |  ") || "(nothing)");
+    });
+    var _lastPose = "";
+    setInterval(function () {
+      var c = scene.camera;
+      var p = c.position.toArray().map(function (v) { return +v.toFixed(2); }).join(",")
+        + "|" + c.quaternion.toArray().map(function (v) { return +v.toFixed(3); }).join(",");
+      if (p !== _lastPose) { _lastPose = p; console.log("[pcCam]", p); }
+    }, 2000);
+  })();
+
+  // Toolbar is one width-agnostic style — no narrow/wide mode switch.
+  window.addEventListener("resize", function() { scene.setSize(el.clientWidth, el.clientHeight); });
   // Apply saved settings then connect
   _applySettings();
   connect();
@@ -485,77 +589,108 @@ var _controlsEnabled = false;
 
 function setControlsEnabled(enabled) {
   _controlsEnabled = enabled;
-  var toggle = document.getElementById("dropdown-toggle");
-  if (enabled) { toggle.classList.remove("disabled"); } else { toggle.classList.add("disabled"); closeDropdown(); }
-  var btns = document.getElementById("world-selector").querySelectorAll("button");
-  for (var i = 0; i < btns.length; i++) btns[i].disabled = !enabled;
+  var chip = document.getElementById("world-chip");
+  if (enabled) { chip.classList.remove("disabled"); } else { chip.classList.add("disabled"); }
+  document.getElementById("wm-import-btn").disabled = !enabled;
 }
 
-function toggleDropdown() {
+function openWorldModal() {
   if (!_controlsEnabled) return;
-  var menu = document.getElementById("dropdown-menu");
-  if (menu.classList.contains("open")) { closeDropdown(); } else { menu.classList.add("open"); }
+  document.getElementById("world-modal-overlay").classList.add("open");
+  document.getElementById("world-modal").classList.add("open");
 }
 
-function closeDropdown() { document.getElementById("dropdown-menu").classList.remove("open"); }
+function closeWorldModal() {
+  document.getElementById("world-modal-overlay").classList.remove("open");
+  document.getElementById("world-modal").classList.remove("open");
+  document.getElementById("file-input").value = "";
+  renderWorldLists();   // collapse any pending inline delete confirm
+}
+
+function _wmStatus(msg, cls) {
+  var el = document.getElementById("wm-status");
+  el.textContent = msg || "";
+  el.className = cls || "";
+}
+
+function renderWorldLists() {
+  var official = document.getElementById("wm-official");
+  var custom = document.getElementById("wm-custom");
+  official.innerHTML = "";
+  custom.innerHTML = "";
+  worldsData.forEach(function(w) {
+    var row = document.createElement("div");
+    var isCurrent = w.name === currentWorld;
+    row.className = "wm-row" + (isCurrent ? " active" : "");
+    var label = document.createElement("span");
+    label.className = "wm-name";
+    label.textContent = (isCurrent ? "\u2713 " : "") + w.name;
+    row.appendChild(label);
+    row.onclick = function() { if (!isCurrent) switchWorld(w.file); };
+    if (w.deletable) {
+      var del = document.createElement("span");
+      del.className = "wm-del";
+      del.innerHTML = "&#x1f5d1;";
+      del.title = "Delete " + w.name;
+      // No window.confirm — it is silently dropped inside webviews. The row
+      // swaps to an inline Delete?/Cancel pair instead.
+      del.onclick = function(e) {
+        e.stopPropagation();
+        row.onclick = null;
+        del.remove();
+        var c = document.createElement("span");
+        c.className = "wm-confirm";
+        c.innerHTML = "Delete?";
+        var yes = document.createElement("button");
+        yes.className = "wm-yes"; yes.textContent = "\u2713";
+        yes.onclick = function(e2) { e2.stopPropagation(); deleteWorld(w.name); };
+        var no = document.createElement("button");
+        no.className = "wm-no"; no.textContent = "\u2715";
+        no.onclick = function(e2) { e2.stopPropagation(); renderWorldLists(); };
+        c.appendChild(yes); c.appendChild(no);
+        row.appendChild(c);
+      };
+      row.appendChild(del);
+    }
+    (w.name.indexOf("custom_") === 0 ? custom : official).appendChild(row);
+  });
+  if (!custom.children.length) {
+    var empty = document.createElement("div");
+    empty.className = "wm-empty";
+    empty.textContent = "No custom worlds yet — import one below.";
+    custom.appendChild(empty);
+  }
+}
 
 function loadWorlds(selectWorld) {
   setControlsEnabled(false);
   fetch("/sim/api/worlds").then(function(r){return r.json()}).then(function(data) {
     worldsData = data.worlds;
     currentWorld = selectWorld || data.current;
-    document.getElementById("dropdown-toggle").textContent = currentWorld || "...";
-    var menu = document.getElementById("dropdown-menu");
-    menu.innerHTML = "";
-    data.worlds.forEach(function(w) {
-      var row = document.createElement("div");
-      row.className = "dropdown-item" + (w.name === currentWorld ? " active" : "");
-      var label = document.createElement("span");
-      label.textContent = w.name;
-      label.style.flex = "1";
-      label.onclick = function() { closeDropdown(); switchWorld(w.file); };
-      row.appendChild(label);
-      if (w.deletable) {
-        var del = document.createElement("span");
-        del.className = "del-btn";
-        del.innerHTML = "&#x1f5d1;";
-        del.title = "Delete " + w.name;
-        del.onclick = function(e) { e.stopPropagation(); closeDropdown(); deleteWorld(w.name); };
-        row.appendChild(del);
-      }
-      menu.appendChild(row);
-    });
+    document.getElementById("world-chip").textContent = currentWorld || "...";
+    renderWorldLists();
     setControlsEnabled(true);
   }).catch(function() { setTimeout(function(){ loadWorlds(); }, 3000); });
 }
 
 function deleteWorld(name) {
-  if (!confirm("Delete world \"" + name + "\"? This cannot be undone.")) return;
   setControlsEnabled(false);
+  _wmStatus("Deleting " + name + "...", "");
   fetch("/sim/api/worlds/" + name, { method: "DELETE" })
     .then(function(r) { return r.json(); })
     .then(function(d) {
       if (d.ok) {
+        var wasCurrent = name === currentWorld;
+        _wmStatus("Deleted " + name + ".", "success");
         loadWorlds();
-        setTimeout(function() { location.reload(); }, 3000);
+        // Deleting the running world makes the server boot the default one —
+        // reload so the viewer follows it.
+        if (wasCurrent) setTimeout(function() { location.reload(); }, 3000);
       } else {
-        alert(d.error || "Delete failed");
+        _wmStatus(d.error || "Delete failed", "error");
         setControlsEnabled(true);
       }
-    }).catch(function() { alert("Delete failed"); setControlsEnabled(true); });
-}
-
-function openUpload() {
-  document.getElementById("upload-overlay").style.display = "block";
-  document.getElementById("upload-area").style.display = "block";
-  document.getElementById("upload-status").textContent = "";
-  document.getElementById("upload-status").className = "";
-}
-
-function closeUpload() {
-  document.getElementById("upload-overlay").style.display = "none";
-  document.getElementById("upload-area").style.display = "none";
-  document.getElementById("file-input").value = "";
+    }).catch(function() { _wmStatus("Delete failed", "error"); setControlsEnabled(true); });
 }
 
 // Drag & drop — 모달 없이도 화면 어디에나 .tar.gz를 떨어뜨리면 업로드
@@ -572,8 +707,8 @@ window.addEventListener("load", function() {
 
 function handleFile(file) {
   if (!file) return;
-  openUpload(); // 진행 표시 모달 — 파일이 정해진 뒤에만 뜬다
-  var statusEl = document.getElementById("upload-status");
+  openWorldModal(); // progress shows in the modal footer (drag&drop path too)
+  var statusEl = document.getElementById("wm-status");
   if (!file.name.endsWith(".tar.gz")) {
     statusEl.textContent = "File must be .tar.gz";
     statusEl.className = "error";
@@ -664,7 +799,7 @@ function handleFile(file) {
       statusEl.className = "success";
       var uploadedWorld = res.world;
       loadWorlds(uploadedWorld);
-      setTimeout(function() { closeUpload(); switchWorld(uploadedWorld + ".world"); }, 1500);
+      setTimeout(function() { closeWorldModal(); switchWorld(uploadedWorld + ".world"); }, 1500);
     } else {
       throw new Error(res.error || "Upload failed");
     }
@@ -679,7 +814,8 @@ function handleFile(file) {
 function switchWorld(worldFile) {
   setControlsEnabled(false);
   var targetWorld = worldFile.replace(/\.world$/, "");
-  document.getElementById("dropdown-toggle").textContent = targetWorld;
+  document.getElementById("world-chip").textContent = targetWorld;
+  closeWorldModal();
   document.getElementById("respawn-btn").disabled = true;
   fetch("/sim/api/switch", {
     method: "POST",
@@ -703,8 +839,8 @@ function switchWorld(worldFile) {
 }
 
 setTimeout(loadWorlds, 500);
-document.addEventListener("click", function(e) {
-  if (!e.target.closest(".dropdown")) closeDropdown();
+document.addEventListener("keydown", function(e) {
+  if (e.key === "Escape") closeWorldModal();
 });
 
 // =====================================================================
@@ -1880,7 +2016,102 @@ function stopAllAudio() {
 //  반드시 gz-scene.js에서 할 것 — 사이트 쪽 사본과 동기화 필요)
 // =====================================================================
 
-var colladaLoader = new THREE.ColladaLoader();
+
+// Ground planes arrive as a handful of GIANT triangles (a world-size quad).
+// Some Windows GPU/driver stacks (ANGLE/D3D) drop such triangles wholesale at
+// oblique camera angles — the field/grass vanished along a straight line
+// while the finely-tessellated road kept rendering. Rebuilding those planes
+// as a ~1m grid (UVs preserved via the plane's affine map) makes them behave
+// like every other mesh. World-builder fields are always full rectangles.
+function _tessellateGiantGround(root) {
+  // A subdivided plane needs a real depth gap below its neighbours (its
+  // per-triangle interpolation jitters where one giant triangle was exact),
+  // so the BOTTOM layer gets lowered by 1mm — but only when nothing else
+  // sits underneath it.
+  var flatZs = [];
+  root.traverse(function (o) {
+    if (!o.isMesh || !o.geometry) return;
+    var g = o.geometry;
+    if (!g.boundingBox) g.computeBoundingBox();
+    var bb = g.boundingBox;
+    if (!bb) return;
+    if (bb.max.z - bb.min.z < 0.01) flatZs.push(bb.min.z);
+  });
+  root.traverse(function (o) {
+    if (!o.isMesh || !o.geometry || !o.material || Array.isArray(o.material)) return;
+    var g = o.geometry;
+    var isBuf = !!g.attributes;
+    var triCount = isBuf
+      ? ((g.index ? g.index.count : (g.attributes.position ? g.attributes.position.count : 0)) / 3)
+      : (g.faces ? g.faces.length : 999);
+    if (triCount > 8 || triCount < 1) return;
+    if (!g.boundingBox) g.computeBoundingBox();
+    var bb = g.boundingBox;
+    if (!bb) return;
+    var w = bb.max.x - bb.min.x, h = bb.max.y - bb.min.y, t = bb.max.z - bb.min.z;
+    if (t > 0.01 || w * h < 4) return;
+    var hasLayerBelow = flatZs.some(function (z) {
+      return z < bb.min.z - 1e-6 && z > bb.min.z - 0.002;
+    });
+    try {
+      // three corner vertices + uvs define the plane's affine UV mapping
+      var v = [], uv = [];
+      if (isBuf) {
+        var pa = g.attributes.position, ua = g.attributes.uv;
+        if (!ua) return;
+        var idx = g.index ? [g.index.getX(0), g.index.getX(1), g.index.getX(2)] : [0, 1, 2];
+        for (var i = 0; i < 3; i++) {
+          v.push([pa.getX(idx[i]), pa.getY(idx[i])]);
+          uv.push([ua.getX(idx[i]), ua.getY(idx[i])]);
+        }
+      } else {
+        if (!g.faces || !g.faces.length || !g.faceVertexUvs
+            || !g.faceVertexUvs[0] || !g.faceVertexUvs[0][0]) return;
+        var f = g.faces[0], fu = g.faceVertexUvs[0][0];
+        [f.a, f.b, f.c].forEach(function (vi, k) {
+          v.push([g.vertices[vi].x, g.vertices[vi].y]);
+          uv.push([fu[k].x, fu[k].y]);
+        });
+      }
+      var e1 = [v[1][0] - v[0][0], v[1][1] - v[0][1]];
+      var e2 = [v[2][0] - v[0][0], v[2][1] - v[0][1]];
+      var det = e1[0] * e2[1] - e1[1] * e2[0];
+      if (Math.abs(det) < 1e-9) return;
+      var uvAt = function (x, y) {
+        var dx = x - v[0][0], dy = y - v[0][1];
+        var a = (dx * e2[1] - dy * e2[0]) / det;
+        var b = (e1[0] * dy - e1[1] * dx) / det;
+        return [uv[0][0] + a * (uv[1][0] - uv[0][0]) + b * (uv[2][0] - uv[0][0]),
+                uv[0][1] + a * (uv[1][1] - uv[0][1]) + b * (uv[2][1] - uv[0][1])];
+      };
+      var z = (bb.min.z + bb.max.z) / 2 - (hasLayerBelow ? 0 : 0.001);
+      var nx = Math.max(4, Math.min(40, Math.ceil(w)));
+      var ny = Math.max(4, Math.min(40, Math.ceil(h)));
+      var pos = [], uvs = [], norm = [], index = [];
+      for (var iy = 0; iy <= ny; iy++) {
+        for (var ix = 0; ix <= nx; ix++) {
+          var x = bb.min.x + (w * ix) / nx, y = bb.min.y + (h * iy) / ny;
+          pos.push(x, y, z);
+          norm.push(0, 0, 1);
+          var q = uvAt(x, y);
+          uvs.push(q[0], q[1]);
+        }
+      }
+      for (var jy = 0; jy < ny; jy++) {
+        for (var jx = 0; jx < nx; jx++) {
+          var a0 = jy * (nx + 1) + jx, b0 = a0 + 1, c0 = a0 + nx + 1, d0 = c0 + 1;
+          index.push(a0, b0, d0, a0, d0, c0);
+        }
+      }
+      var ng = new THREE.BufferGeometry();
+      ng.setIndex(index);
+      ng.addAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+      ng.addAttribute("normal", new THREE.Float32BufferAttribute(norm, 3));
+      ng.addAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
+      o.geometry = ng;
+    } catch (e) { /* leave the original geometry untouched */ }
+  });
+}
 
 function _meshPath(uri) {
   var mi = uri.indexOf('meshes/');
@@ -1894,7 +2125,16 @@ var gzScene = GzScene.create({
     return p ? "/sim/meshes/" + p : null;
   },
   loadMesh: function(url, onLoad, onError) {
-    colladaLoader.load(url, function(collada) { onLoad(collada.scene); }, null, onError);
+    // FRESH loader per file — THREE's ColladaLoader is not reentrant (parse
+    // state lives on the instance, and world-builder daes reuse library IDs
+    // like "Field"/"StartLine"). With a shared instance, overlapping loads
+    // (world switch while the old world's meshes still stream in) graft one
+    // world's geometry into the other's models.
+    new THREE.ColladaLoader().load(url,
+      function(collada) {
+        _tessellateGiantGround(collada.scene);
+        onLoad(collada.scene);
+      }, null, onError);
   },
   isPhysicarMesh: function(uri) {
     var p = _meshPath(uri);
