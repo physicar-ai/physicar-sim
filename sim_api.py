@@ -404,6 +404,10 @@ try:
     from gz.msgs10.boolean_pb2 import Boolean as _PbBoolean
     from gz.msgs10.pose_pb2 import Pose as _PbPose
     from gz.msgs10.visual_pb2 import Visual as _PbVisual
+    from gz.msgs10.entity_pb2 import Entity as _PbEntity
+    from gz.msgs10.entity_factory_pb2 import EntityFactory as _PbEntityFactory
+    from gz.msgs10.empty_pb2 import Empty as _PbEmpty
+    from gz.msgs10.scene_pb2 import Scene as _PbScene
     _gz_node = _GzTNode()
 except Exception:
     _gz_node = None
@@ -452,7 +456,10 @@ def _parse_pose_block(block):
     yaw = math.atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz))
     return nm.group(1), {
         "x": round(float(px.group(1)), 6), "y": round(float(py.group(1)), 6),
-        "z": round(float(pz.group(1)), 6), "yaw": round(yaw, 6)}
+        "z": round(float(pz.group(1)), 6), "yaw": round(yaw, 6),
+        # full orientation — needed to respawn state-variant models of a
+        # toppled traffic light in exactly its current attitude
+        "q": (round(qx, 6), round(qy, 6), round(qz, 6), round(qw, 6))}
 
 
 def _spawn_pose_reader(world):
@@ -698,24 +705,20 @@ _yellow_timers = {}               # name -> threading.Timer
 _lights = {}            # name -> {"x", "y", "yaw", "state"} — 월드 정의 신호등만
 _lights_world = None    # world the registry belongs to
 
-# 상태 표시 계약 — 오버레이 포즈-스왑 (2026-08-08 개편):
-# visual_config 재질 변경은 서비스가 true를 돌려주면서도 서버 센서 씬(차량
-# 카메라)에 반영되지 않는다 (실측: scene/info 재질도 불변 — 런타임 조명 무시와
-# 같은 계열). 그래서 카메라에 보이는 상태는 전부 "포즈 스트리밍이 되는 non-static
-# 오버레이 모델"로 표현한다 (노랑 오버레이와 동일 기법, 실측 검증):
-#   <name>_yellow — 밝은 노랑 디스크 (yellow 상태에 패널 중앙)
-#   <name>_red    — 밝은 빨강 디스크 (red 상태에 lamp_red 앞)
-#   <name>_gcover — 어두운 초록 디스크 (green이 아닐 때 lamp_green을 덮음 —
-#                    월드 SDF의 기본 램프가 "초록 점등"으로 구워져 있기 때문)
-# 램프 위치/반지름은 월드 SDF의 lamp_red/lamp_green visual에서 읽는다. 이 visual이
-# 없는 구 월드는 오버레이를 못 만들므로 visual_config 폴백만 남는다 (카메라 미반영).
-# 웹 뷰어는 상태를 REST로 읽어 three.js 재질을 직접 칠한다 (gzweb.js).
-# visual_config 호출은 유지한다 — 지금은 무해한 no-op이고, GUI 클라이언트나
-# 이후 gz 버전에서 동작하면 기본 램프 색까지 일치시켜 준다.
+# 상태 표시 계약 — 상태별 모델 통째 교체 (2026-08-08 재설계):
+# gz 센서 씬(차량 카메라)은 런타임 재질 변경(visual_config)과 조명 변경을 전부
+# 무시한다 (실측). 확실히 존중하는 연산은 "엔티티 생성/삭제"와 "포즈"뿐이다.
+# 그래서 상태 변경 = 램프 색을 SDF에 구워 넣은 모델 변형으로 신호등을 통째
+# 교체한다 (remove+create, in-process 노드라 ms 단위):
+#   green  — 월드 원본 그대로 (익스포트가 초록 점등으로 구워져 있음)
+#   red    — lamp_red 밝음 / lamp_green 어두움 재질로 패치한 변형
+#   yellow — 양쪽 어두움 + 패널 중앙에 lamp_yellow visual 추가한 변형
+# 램프가 몸체 링크의 visual이므로 차량이 밀거나 넘어뜨려도 절대 분리되지
+# 않는다 (별도 오버레이 모델 추종 방식은 폐지 — 근본적으로 불안정했다).
+# 넘어진 채 상태를 바꾸면 실시간 포즈 캐시의 전체 쿼터니언으로 그 자세 그대로
+# 재스폰한다. 웹 뷰어는 상태를 REST로 읽어 three.js 재질을 직접 칠한다.
 _LAMP_COLORS = {
-    # state -> {visual: (ambient/diffuse rgb, emissive rgb|None)}
-    # 노랑은 visual이 아니라 오버레이 모델(<name>_yellow, 포즈-스왑)이 담당 —
-    # 앱과 동일하게 어두운 빨강/초록 위에 밝은 노랑이 겹친다.
+    # state -> {visual: (ambient/diffuse rgb, emissive rgb|None)} — 변형 SDF 재질
     "red": {
         "lamp_red": ("1 0 0", "0.5 0 0"),
         "lamp_green": ("0 0.07 0", None),
@@ -729,201 +732,174 @@ _LAMP_COLORS = {
         "lamp_green": ("0 1 0", "0 0.5 0"),
     },
 }
-_OVERLAY_HIDDEN_Z = -50.0  # 오버레이 OFF 대기 위치 — 필드 가장자리 밖 시점에서도
-                           # 안 보이게 깊이 내린다 (뷰어는 지하 오버레이를 아예 숨김)
+_YELLOW_LAMP = ("1 0.8 0", "0.5 0.4 0")   # lamp_yellow visual 재질 (yellow 변형 전용)
 
 # visual_config 는 스코프드 네임을 받지 않는다 (UserCommands VisualCommand:
 # ① msg.id(엔티티 ID) ② parent_name(링크 Name 전역 검색) + name(visual 평이름)).
 # 링크명이 전부 "light"라 신호등 2개 이상이면 ②는 모호 → scene/info에서 visual
 # 엔티티 ID를 수집해 ID로 지정한다 (월드 로드마다 ID가 바뀌므로 매번 재수집).
-_visual_ids = {}   # (model_name, visual_name) -> entity id — 현재 월드 기준
+# ── 상태별 모델 변형 (SDF에 램프 색 bake) ─────────────────────────────────
+_light_model_src = {}   # name -> 월드 파일의 <model> XML (green 점등 원본)
+_LIGHT_SDF_DIR = "/tmp/physicar_light_states"
 
-def _scan_visual_ids(world):
-    """scene/info의 model>link>visual 계층에서 visual 엔티티 ID 수집."""
-    _visual_ids.clear()
+def _light_variant_sdf(name, state):
+    """상태별 신호등 SDF 생성 — 원본 모델의 lamp visual 재질을 교체하고,
+    yellow는 패널 중앙에 lamp_yellow visual을 추가한다. 생성 비용이 ms라
+    캐시 없이 매번 새로 쓴다 (월드 재업로드에도 항상 최신)."""
+    import xml.etree.ElementTree as ET
+    import copy as _copy
+    src = _light_model_src.get(name)
+    if not src:
+        return None
     try:
-        r = _run_gz_cmd("gz", "service", "-s", f"/world/{world}/scene/info",
-                        "--reqtype", "gz.msgs.Empty",
-                        "--reptype", "gz.msgs.Scene",
-                        "--timeout", "5000", "--req", "")
-        if r.returncode != 0 or not r.stdout:
-            return
-    except Exception:
-        return
-    # 텍스트 protobuf 파서: 블록 스택 — 관심 프레임(model/link/visual)의 name/id만 수집
-    stack = []
-    for raw in r.stdout.splitlines():
-        line = raw.strip()
-        m = re.match(r'^(\w+)\s*\{$', line)
-        if m:
-            stack.append({"_type": m.group(1)})
-            continue
-        if line == "}":
-            if not stack:
-                continue
-            fr = stack.pop()
-            if fr["_type"] == "visual" and "name" in fr and "id" in fr:
-                model = next((f for f in reversed(stack) if f["_type"] == "model"), None)
-                if model and "name" in model:
-                    _visual_ids[(model["name"], fr["name"])] = fr["id"]
-            continue
-        m = re.match(r'^name:\s*"([^"]*)"$', line)
-        if m and stack:
-            stack[-1].setdefault("name", m.group(1))
-            continue
-        m = re.match(r'^id:\s*(\d+)$', line)
-        if m and stack:
-            stack[-1].setdefault("id", int(m.group(1)))
-    logging.info("visual ids scanned: %d entries", len(_visual_ids))
+        model = ET.fromstring(src)
+        # 월드 배치 pose 제거 — 스폰 pose는 EntityFactory가 지정한다
+        pe = model.find("pose")
+        if pe is not None:
+            model.remove(pe)
+        link = next((lk for lk in model.findall("link")
+                     if lk.get("name") in ("light", "signal")), None)
+        if link is None:
+            return None
 
-def _set_visual_material(world, model, visual, rgb, emissive):
-    """visual_config 유저 커맨드 — 서비스는 true를 주지만 센서 씬에는 반영되지
-    않는다 (실측). 호환용 best-effort로만 호출된다."""
-    vid = _visual_ids.get((model, visual))
-    if vid is None:
-        _scan_visual_ids(world)
-        vid = _visual_ids.get((model, visual))
-    r_, g_, b_ = [float(t) for t in rgb.split()]
-    er, eg, eb = [float(t) for t in (emissive or "0 0 0").split()]
+        def set_mat(vis, rgb, emissive):
+            m = vis.find("material")
+            if m is None:
+                m = ET.SubElement(vis, "material")
+            for tag in ("ambient", "diffuse"):
+                el = m.find(tag)
+                if el is None:
+                    el = ET.SubElement(m, tag)
+                el.text = f"{rgb} 1"
+            el = m.find("emissive")
+            if el is None:
+                el = ET.SubElement(m, "emissive")
+            el.text = f"{emissive or '0 0 0'} 1"
+
+        vis_by_name = {v.get("name"): v for v in link.findall("visual")}
+        for lamp, (rgb, emissive) in _LAMP_COLORS[state].items():
+            if lamp in vis_by_name:
+                set_mat(vis_by_name[lamp], rgb, emissive)
+        if state == "yellow" and "lamp_green" in vis_by_name:
+            with _lock:
+                pn = (_lights.get(name) or {}).get("panel")
+            yv = _copy.deepcopy(vis_by_name["lamp_green"])
+            yv.set("name", "lamp_yellow")
+            pose_el = yv.find("pose")
+            if pn and pose_el is not None and pose_el.text:
+                parts = pose_el.text.split()
+                if len(parts) >= 6:
+                    parts[0] = str(pn["px"])
+                    parts[2] = str(pn["pz"])
+                    pose_el.text = " ".join(parts)
+            set_mat(yv, _YELLOW_LAMP[0], _YELLOW_LAMP[1])
+            link.append(yv)
+
+        os.makedirs(_LIGHT_SDF_DIR, exist_ok=True)
+        path = os.path.join(_LIGHT_SDF_DIR, f"{name}_{state}.sdf")
+        sdf = ET.Element("sdf", {"version": "1.7"})
+        sdf.append(model)
+        ET.ElementTree(sdf).write(path)
+        return path
+    except Exception:
+        logging.exception("light variant sdf failed: %s %s", name, state)
+        return None
+
+def _remove_entity(world, name):
     if _gz_node is not None:
         try:
-            v = _PbVisual()
-            if vid is not None:
-                v.id = vid
-            else:
-                # 폴백: 링크명 전역 검색 — 신호등이 하나뿐인 월드에서만 정확
-                v.name = visual
-                v.parent_name = "light"
-            m = v.material
-            m.ambient.r, m.ambient.g, m.ambient.b, m.ambient.a = r_, g_, b_, 1.0
-            m.diffuse.CopyFrom(m.ambient)
-            m.emissive.r, m.emissive.g, m.emissive.b, m.emissive.a = er, eg, eb, 1.0
-            rep = _gz_request(f"/world/{world}/visual_config", v, _PbVisual, _PbBoolean)
+            e = _PbEntity()
+            e.name = name
+            e.type = _PbEntity.MODEL
+            rep = _gz_request(f"/world/{world}/remove", e, _PbEntity, _PbBoolean)
             if rep is not None:
                 return bool(rep.data)
         except Exception:
             pass
-    if vid is not None:
-        sel = f'id: {vid}'
-    else:
-        sel = f'name: "{visual}", parent_name: "light"'
-    mat = (f'ambient: {{r: {r_}, g: {g_}, b: {b_}, a: 1}}, '
-           f'diffuse: {{r: {r_}, g: {g_}, b: {b_}, a: 1}}')
-    mat += f', emissive: {{r: {er}, g: {eg}, b: {eb}, a: 1}}'
     try:
-        r = _run_gz_cmd("gz", "service", "-s", f"/world/{world}/visual_config",
-                        "--reqtype", "gz.msgs.Visual",
+        r = _run_gz_cmd("gz", "service", "-s", f"/world/{world}/remove",
+                        "--reqtype", "gz.msgs.Entity",
                         "--reptype", "gz.msgs.Boolean",
                         "--timeout", "3000",
-                        "--req", f'{sel}, material: {{{mat}}}')
-        ok = r.returncode == 0 and "true" in r.stdout
-        if not ok:
-            logging.warning("visual_config failed: %s/%s (%s)", model, visual, sel)
-        return ok
-    except Exception as e:
-        logging.warning("visual_config error: %s/%s (%s)", model, visual, e)
+                        "--req", f'name: "{name}", type: MODEL')
+        return r.returncode == 0 and "true" in r.stdout
+    except Exception:
         return False
 
-# suffix -> (panel anchor key | None=패널 중앙, ambient/diffuse rgb, emissive rgb)
-_OVERLAY_SPECS = {
-    "yellow": (None, "1 0.8 0", "0.5 0.4 0"),
-    "red": ("red", "1 0 0", "0.5 0 0"),
-    "gcover": ("green", "0 0.07 0", "0 0 0"),
-}
+def _create_entity(world, sdf_path, name, x, y, z, q):
+    if _gz_node is not None:
+        try:
+            f = _PbEntityFactory()
+            f.sdf_filename = sdf_path
+            f.name = name
+            f.pose.position.x, f.pose.position.y, f.pose.position.z = x, y, z
+            (f.pose.orientation.x, f.pose.orientation.y,
+             f.pose.orientation.z, f.pose.orientation.w) = q
+            rep = _gz_request(f"/world/{world}/create", f, _PbEntityFactory, _PbBoolean)
+            if rep is not None:
+                return bool(rep.data)
+        except Exception:
+            pass
+    try:
+        req = (f'sdf_filename: "{sdf_path}", name: "{name}", pose: {{'
+               f'position: {{x: {x:.6f}, y: {y:.6f}, z: {z:.6f}}}, '
+               f'orientation: {{x: {q[0]:.6f}, y: {q[1]:.6f}, z: {q[2]:.6f}, w: {q[3]:.6f}}}}}')
+        r = _run_gz_cmd("gz", "service", "-s", f"/world/{world}/create",
+                        "--reqtype", "gz.msgs.EntityFactory",
+                        "--reptype", "gz.msgs.Boolean",
+                        "--timeout", "5000", "--req", req)
+        return r.returncode == 0 and "true" in r.stdout
+    except Exception:
+        return False
 
-def _overlay_states(state):
-    """suffix -> ON? — 기본 램프가 '초록 점등'으로 구워져 있다는 전제의 상태표."""
-    return {
-        "yellow": state == "yellow",
-        "red": state == "red",
-        "gcover": state != "green",
-    }
-
-def _overlay_anchor(pn, suffix):
-    """오버레이의 모델-로컬 앵커 {px, pz, r} — 없으면 None (구 월드)."""
-    key = _OVERLAY_SPECS[suffix][0]
-    if key is None:
-        return {"px": pn["px"], "pz": pn["pz"], "r": pn["lamp_r"]}
-    return pn.get(key)
-
-def _overlay_pose_at(sig, anchor, on):
-    """오버레이 월드 포즈 — ON: 앵커 위치, OFF: 지하."""
-    if not on:
-        return sig["x"], sig["y"], _OVERLAY_HIDDEN_Z
-    wx = sig["x"] + math.cos(sig["yaw"]) * anchor["px"]
-    wy = sig["y"] + math.sin(sig["yaw"]) * anchor["px"]
-    return wx, wy, anchor["pz"]
+def _entity_exists(world, name):
+    """scene/info에서 모델 존재 확인 — 유저 커맨드(remove/create)는 응답 true가
+    '큐에 들어감'일 뿐이라, 실제 반영 여부는 이걸로 확인해야 한다."""
+    if _gz_node is not None:
+        try:
+            rep = _gz_request(f"/world/{world}/scene/info", _PbEmpty(),
+                              _PbEmpty, _PbScene, 3000)
+            if rep is not None:
+                return any(m.name == name for m in rep.model)
+        except Exception:
+            pass
+    try:
+        r = _run_gz_cmd("gz", "service", "-s", f"/world/{world}/scene/info",
+                        "--reqtype", "gz.msgs.Empty", "--reptype", "gz.msgs.Scene",
+                        "--timeout", "3000", "--req", "")
+        return f'name: "{name}"' in (r.stdout or "")
+    except Exception:
+        return False
 
 def _apply_light_state(world, name, sig):
-    """오버레이 포즈-스왑이 카메라에 보이는 진실. visual_config는 호환용."""
-    ok = True
-    pn = sig.get("panel")
-    if pn:
-        on = _overlay_states(sig["state"])
-        for suffix in _OVERLAY_SPECS:
-            anchor = _overlay_anchor(pn, suffix)
-            if not anchor:
-                continue
-            wx, wy, wz = _overlay_pose_at(sig, anchor, on[suffix])
-            ok = _set_entity_pose(world, f"{name}_{suffix}", wx, wy, wz,
-                                  sig["yaw"], pn["pitch"]) and ok
-    for lamp, (rgb, emissive) in _LAMP_COLORS[sig["state"]].items():
-        _set_visual_material(world, name, lamp, rgb, emissive)
-    return ok
-
-def _spawn_light_overlays(world, name, sig):
-    """상태 오버레이 모델 스폰 (라이트당 최대 3개: yellow/red/gcover, 평상시
-    지하 — non-static이라 포즈가 스트리밍되어 뷰어와 서버 카메라 렌더 모두에
-    반영된다. 램프 재질은 visual_config로 못 바꾸므로 이 포즈-스왑이 유일하게
-    카메라에 보이는 상태 표현이다)."""
-    pn = sig.get("panel")
-    if not pn:
-        return
-    os.makedirs(_OVERLAY_SDF_DIR, exist_ok=True)
-    on = _overlay_states(sig["state"])
-    for suffix, (_key, rgb, emissive) in _OVERLAY_SPECS.items():
-        anchor = _overlay_anchor(pn, suffix)
-        if not anchor:
-            continue   # old worlds without lamp_red/lamp_green visuals
-        model = f"{name}_{suffix}"
-        path = os.path.join(_OVERLAY_SDF_DIR, f"{model}.sdf")
-        with open(path, "w") as f:
-            f.write(f"""<?xml version="1.0"?>
-<sdf version="1.7">
-<model name="{model}">
-  <static>false</static>
-  <link name="link">
-    <gravity>false</gravity>
-    <inertial>
-      <mass>0.01</mass>
-      <inertia>
-        <ixx>0.00001</ixx><ixy>0</ixy><ixz>0</ixz>
-        <iyy>0.00001</iyy><iyz>0</iyz>
-        <izz>0.00001</izz>
-      </inertia>
-    </inertial>
-    <visual name="lamp">
-      <pose>0 0 0 0 1.5708 0</pose>
-      <geometry><cylinder><radius>{anchor["r"]}</radius><length>0.0015</length></cylinder></geometry>
-      <material><ambient>{rgb} 1</ambient><diffuse>{rgb} 1</diffuse><emissive>{emissive} 1</emissive></material>
-    </visual>
-  </link>
-</model>
-</sdf>
-""")
-        wx, wy, wz = _overlay_pose_at(sig, anchor, on[suffix])
-        try:
-            r = _run_gz_cmd("gz", "service", "-s", f"/world/{world}/create",
-                            "--reqtype", "gz.msgs.EntityFactory",
-                            "--reptype", "gz.msgs.Boolean",
-                            "--timeout", "5000",
-                            "--req", f'sdf_filename: "{path}", name: "{model}", '
-                                     f'pose: {{{_pose_fields(wx, wy, wz, sig["yaw"], pn["pitch"])}}}')
-            if r.returncode != 0 or "true" not in r.stdout:
-                # 같은 월드 재스캔이면 이미 존재 — 위치만 맞춘다
-                _set_entity_pose(world, model, wx, wy, wz, sig["yaw"], pn["pitch"])
-        except Exception as e:
-            logging.warning("light overlay spawn failed: %s (%s)", model, e)
+    """상태 적용 = 램프 색이 구워진 변형 모델로 통째 교체 (remove+create).
+    램프가 몸체 링크의 visual이라 물리로 밀리든 넘어지든 분리 불가능.
+    현재 실포즈(전체 쿼터니언)를 그대로 이어받아 재스폰한다.
+    remove가 실제로 반영되기 전에 같은 이름으로 create하면 조용히 버려지므로
+    (큐잉 true ≠ 실행 성공), 반영을 확인하고 나서 생성한다."""
+    path = _light_variant_sdf(name, sig["state"])
+    if not path:
+        return False
+    with _gz_cache_lock:
+        p = _gz_poses.get(name)
+    if p and p.get("q"):
+        x, y, z, q = p["x"], p["y"], p["z"], p["q"]
+    else:
+        sy, cy = math.sin(sig["yaw"] / 2), math.cos(sig["yaw"] / 2)
+        x, y, z, q = sig["x"], sig["y"], 0.0, (0.0, 0.0, sy, cy)
+    _remove_entity(world, name)
+    for _ in range(20):                      # 삭제 반영 대기 (보통 1스텝, ≤1s)
+        if not _entity_exists(world, name):
+            break
+        time.sleep(0.05)
+    for attempt in range(3):
+        _create_entity(world, path, name, x, y, z, q)
+        for _ in range(10):                  # 생성 반영 확인 (≤0.5s)
+            if _entity_exists(world, name):
+                return True
+            time.sleep(0.05)
+    logging.warning("light state swap failed: %s -> %s", name, sig["state"])
+    return False
 
 # ── Scene brightness factor (presentation layer) ───────────────────────────
 # The gz sensor render scene ignores runtime light changes (verified: even
@@ -956,8 +932,6 @@ def _save_brightness(v):
         logging.exception("brightness save failed")
 
 _load_brightness()
-
-_OVERLAY_SDF_DIR = "/tmp/physicar_light_overlays"
 
 def _pose_fields(x, y, z, yaw, pitch=0.0):
     """Protobuf text for a gz.msgs.Pose (yaw ⊗ pitch)."""
@@ -995,8 +969,8 @@ def _set_entity_pose(world, name, x, y, z, yaw, pitch=0.0):
         return False
 
 def _move_light(world, name, x, y, yaw):
-    """신호등 텔레포트 — 스탠드 set_pose(z=0·yaw-only = 재기립) + 노랑 오버레이 동반.
-    램프 visual은 링크 소속이라 함께 움직인다. 노랑 경유 중에도 이동 허용."""
+    """신호등 텔레포트 — set_pose(z=0·yaw-only = 재기립). 램프는 몸체 visual이라
+    자동으로 함께 움직인다. 노랑 경유 중에도 이동 허용."""
     with _lock:
         sig = _lights.get(name)
         if sig is None:
@@ -1004,15 +978,6 @@ def _move_light(world, name, x, y, yaw):
         sig = dict(sig, x=round(x, 6), y=round(y, 6), yaw=round(yaw, 6))
         _lights[name] = sig
     ok = _set_entity_pose(world, name, x, y, 0.0, yaw)
-    pn = sig.get("panel")
-    if pn:
-        on = _overlay_states(sig["state"])
-        for suffix in _OVERLAY_SPECS:
-            anchor = _overlay_anchor(pn, suffix)
-            if not anchor:
-                continue
-            wx, wy, wz = _overlay_pose_at(sig, anchor, on[suffix])
-            _set_entity_pose(world, f"{name}_{suffix}", wx, wy, wz, sig["yaw"], pn["pitch"])
     return ok, sig, (None if ok else "pose change failed")
 
 def _set_light_target(world, name, target):
@@ -1044,12 +1009,12 @@ def _set_light_target(world, name, target):
     return True, sig, None
 
 def _light_pose_watcher():
-    """물리 충돌 추적 — 차량이 신호등을 밀면 물리 엔진이 모델을 옮기지만 등록
-    포즈(sig)와 오버레이는 API 경로만 갱신했다. dynamic_pose 캐시의 실좌표와
-    sig가 어긋나면 sig를 따라 옮기고 오버레이를 재배치한다 (0.3s 주기, 오버레이
-    이동은 in-process 노드라 ms 단위)."""
+    """등록 포즈 동기화 — 차량이 신호등을 밀면 물리가 모델을 옮기므로, 실좌표
+    (dynamic_pose 캐시)를 sig에 반영해 /traffic_lights 응답과 상태 교체 시의
+    재스폰 위치를 최신으로 유지한다. 램프는 몸체 visual이라 시각적 추종은
+    필요 없다 (틱 비용은 dict 비교 µs 수준)."""
     while True:
-        time.sleep(0.3)
+        time.sleep(0.2)
         try:
             with _lock:
                 world = _current_world
@@ -1073,7 +1038,6 @@ def _light_pose_watcher():
                     sig = dict(cur, x=round(p["x"], 6), y=round(p["y"], 6),
                                yaw=round(p["yaw"], 6))
                     _lights[name] = sig
-                _apply_light_state(world, name, sig)
         except Exception:
             logging.exception("light pose watcher")
 
@@ -1125,30 +1089,17 @@ def _scan_world_lights(world):
             parts = pose_el.text.split()
             if len(parts) >= 6:
                 x, y, yaw = float(parts[0]), float(parts[1]), float(parts[5])
-        # 자기기술 계약: screen visual의 pose(pitch=-tilt)/size → 노랑 오버레이 배치
-        # (지름 = min(가로×0.98, 세로×0.41) — 앱과 동일, 화면 앞 0.4mm).
-        # lamp_red/lamp_green visual의 로컬 pose/반지름 → 빨강/초록커버 오버레이 앵커.
+        # 자기기술 계약: screen visual의 pose(pitch=-tilt)/size → yellow 변형의
+        # lamp_yellow visual 배치 (지름 = min(가로×0.98, 세로×0.41) — 앱과 동일)
         panel = None
-        lamps = {}
         for v in sig_link.findall("visual"):
-            nm = v.get("name")
-            if nm in ("lamp_red", "lamp_green"):
-                try:
-                    vp = [float(t) for t in (v.findtext("pose") or "0 0 0 0 0 0").split()]
-                    rad = float(v.findtext(".//cylinder/radius") or 0)
-                    ln = float(v.findtext(".//cylinder/length") or 0.0015)
-                    if rad > 0:
-                        lamps[nm] = {"lx": vp[0], "lz": vp[2], "r": round(rad, 5), "len": ln}
-                except Exception:
-                    pass
-                continue
-            if nm != "screen" or panel is not None:
+            if v.get("name") != "screen" or panel is not None:
                 continue
             try:
                 vp = [float(t) for t in (v.findtext("pose") or "0 0 0 0 0 0").split()]
                 sz = [float(t) for t in (v.findtext(".//box/size") or "0.003 0.166 0.295").split()]
                 tilt = -vp[4]
-                foff = sz[0] / 2 + 0.0015 / 2 + 0.0004  # 화면 앞 0.4mm + 디스크 절반
+                foff = sz[0] / 2 + 0.0015 / 2 + 0.0004  # 화면 앞 0.4mm
                 panel = {
                     "px": round(vp[0] + math.cos(tilt) * foff, 6),
                     "pz": round(vp[2] + math.sin(tilt) * foff, 6),
@@ -1157,26 +1108,6 @@ def _scan_world_lights(world):
                 }
             except Exception:
                 panel = None
-        if panel:
-            tilt = -panel["pitch"]
-            for key, lm in (("red", lamps.get("lamp_red")), ("green", lamps.get("lamp_green"))):
-                if not lm:
-                    continue
-                doff = lm["len"] / 2 + 0.0015 / 2 + 0.0004  # 램프 앞 0.4mm + 디스크 절반
-                panel[key] = {
-                    "px": round(lm["lx"] + math.cos(tilt) * doff, 6),
-                    "pz": round(lm["lz"] + math.sin(tilt) * doff, 6),
-                    "r": lm["r"],
-                }
-            # 노랑 디스크는 패널 중앙에 떠서 램프 커버 디스크들과 세로로 겹친다.
-            # 커버는 (기울어진) 패널 면에서 법선으로 ~3mm 떠 있으므로, 노랑을
-            # 법선 방향으로 +3mm 더 밀어 겹침 구간에서 항상 커버 앞에 오게 한다.
-            # (램프의 로컬 x를 그대로 비교하면 안 된다 — 기울어진 판에서는 낮은
-            # 램프일수록 x가 클 뿐, 면에서 떨어져 있는 게 아니다.)
-            if "red" in panel or "green" in panel:
-                extra = 0.003
-                panel["px"] = round(panel["px"] + math.cos(tilt) * extra, 6)
-                panel["pz"] = round(panel["pz"] + math.sin(tilt) * extra, 6)
         with _lock:
             existing = _lights.get(name)
             prev_state = existing["state"] if existing else "green"
@@ -1191,9 +1122,10 @@ def _scan_world_lights(world):
                 sig["panel"] = panel
             _lights[name] = sig
         seen.add(name)
+        # 상태 변형 SDF의 원본 — green 점등으로 구워진 월드 정의 그대로
+        _light_model_src[name] = ET.tostring(m, encoding="unicode")
         logging.info("world light registered: %s", name)
-        _spawn_light_overlays(world, name, sig)
-        # 익스포트 SDF는 초록 점등으로 구워져 있음 — 보존 상태가 다르면 색 복원
+        # 익스포트 SDF는 초록 점등으로 구워져 있음 — 보존 상태가 다르면 모델 교체
         if sig["state"] != "green":
             _apply_light_state(world, name, sig)
     # 이전 월드 파일 버전의 잔재 정리 (같은 이름 월드가 교체 업로드된 경우)
@@ -1324,7 +1256,6 @@ def start_sim(world_file):
                     if proc.poll() is not None:
                         logging.error("gz sim died after spawn (exit %s)", proc.returncode)
                         return
-                    _scan_visual_ids(wname)
                     _scan_world_lights(wname)
                     logging.info("physicar spawned, starting gz-launch")
                     _start_launch()
