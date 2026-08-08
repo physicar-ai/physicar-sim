@@ -1043,6 +1043,40 @@ def _set_light_target(world, name, target):
         t.start()
     return True, sig, None
 
+def _light_pose_watcher():
+    """물리 충돌 추적 — 차량이 신호등을 밀면 물리 엔진이 모델을 옮기지만 등록
+    포즈(sig)와 오버레이는 API 경로만 갱신했다. dynamic_pose 캐시의 실좌표와
+    sig가 어긋나면 sig를 따라 옮기고 오버레이를 재배치한다 (0.3s 주기, 오버레이
+    이동은 in-process 노드라 ms 단위)."""
+    while True:
+        time.sleep(0.3)
+        try:
+            with _lock:
+                world = _current_world
+                switching = _switching
+                lights = dict(_lights)
+            if not world or switching or not lights:
+                continue
+            for name, sig in lights.items():
+                with _gz_cache_lock:
+                    p = _gz_poses.get(name)
+                if not p:
+                    continue
+                d_ang = abs((p["yaw"] - sig["yaw"] + math.pi) % (2 * math.pi) - math.pi)
+                if (abs(p["x"] - sig["x"]) < 0.02 and abs(p["y"] - sig["y"]) < 0.02
+                        and d_ang < 0.05):
+                    continue
+                with _lock:
+                    cur = _lights.get(name)
+                    if cur is None or cur["state"] != sig["state"]:
+                        continue   # state changed mid-check — next tick catches up
+                    sig = dict(cur, x=round(p["x"], 6), y=round(p["y"], 6),
+                               yaw=round(p["yaw"], 6))
+                    _lights[name] = sig
+                _apply_light_state(world, name, sig)
+        except Exception:
+            logging.exception("light pose watcher")
+
 def _finish_yellow(world, name, target):
     with _lock:
         _yellow_timers.pop(name, None)
@@ -1943,6 +1977,7 @@ if __name__ == "__main__":
     threading.Thread(target=start_sim, args=(_load_boot_world(),), daemon=True).start()
     threading.Thread(target=_watchdog, daemon=True).start()
     threading.Thread(target=_gz_cache_manager, daemon=True).start()
+    threading.Thread(target=_light_pose_watcher, daemon=True).start()
     # Threaded: long-lived streams (/events) must not block other requests.
     # Shared state is already lock-guarded (_lock, _gz_cache_lock) because
     # background threads mutate it concurrently with handlers anyway.

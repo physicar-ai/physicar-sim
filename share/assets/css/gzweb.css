@@ -25,7 +25,9 @@ body { background: #1a1a2e; color: #eee; font-family: sans-serif; overflow: hidd
   border-radius: calc(var(--u)*0.46); color: #eee; cursor: pointer;
   transition: background 0.15s, border-color 0.15s; padding: 0;
   font-size: var(--u); }
-#respawn-btn, #settings { display: flex; align-items: center; justify-content: center; }
+#respawn-btn, #settings { display: flex; align-items: center; justify-content: center;
+  /* icon buttons are perfect circles (the world chip stays a rounded rect) */
+  width: calc(var(--u)*2); min-width: calc(var(--u)*2); border-radius: 50%; }
 #respawn-btn:hover:not(:disabled), #world-chip:hover:not(.disabled),
 #settings:hover { background: rgba(60,60,100,0.9); border-color: #888; }
 #respawn-btn:active:not(:disabled) { background: rgba(40,120,80,0.9); border-color: #4ade80; }
