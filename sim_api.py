@@ -267,6 +267,7 @@ def _delete_world_files(world_name):
     """Delete all files associated with a world."""
     paths = [
         os.path.join(WORLDS_DIR, f"{world_name}.world"),
+        os.path.join(WORLDS_DIR, f"{world_name}.pcpub.json"),
         os.path.join(SHARE_DIR, "models", world_name),
         os.path.join(SHARE_DIR, "meshes", world_name),
         os.path.join(SHARE_DIR, "routes", f"{world_name}.npy"),
@@ -277,6 +278,101 @@ def _delete_world_files(world_name):
             os.remove(p)
         elif os.path.isdir(p):
             shutil.rmtree(p)
+
+
+# ── Published world install (worlds.physicar.ai) ─────────────────────
+# WB Publish 가 R2 에 올린 월드를 EC2 가 직접 내려받아 설치한다 (인바운드는
+# 무료·egress 캡 무관). 로컬 배치는 tar 임포트와 동일한 custom_* 관례 —
+# 원본이 R2 에 있으므로 로컬은 캐시이며, rev 가 같으면 재다운로드를 건너뛴다.
+WORLDS_CDN = os.environ.get("PHYSICAR_WORLDS_URL", "https://worlds.physicar.ai")
+_INSTALL_SUBDIRS = ("worlds/", "meshes/", "models/", "routes/", "track_iconography/")
+
+class _InstallError(Exception):
+    def __init__(self, code, msg):
+        super().__init__(msg)
+        self.code = code
+
+def _pub_sidecar_path(world_name):
+    return os.path.join(WORLDS_DIR, f"{world_name}.pcpub.json")
+
+def _pub_sidecar(world_name):
+    try:
+        with open(_pub_sidecar_path(world_name)) as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+def _safe_install_path(p):
+    """매니페스트 경로 검증 — share/ 하위 화이트리스트 디렉토리만, 탈출 불가."""
+    if not isinstance(p, str) or len(p) > 200:
+        return None
+    if not any(p.startswith(d) for d in _INSTALL_SUBDIRS):
+        return None
+    for seg in p.split("/"):
+        if not seg or seg in (".", "..") or seg.startswith("."):
+            return None
+        if not re.match(r'^[A-Za-z0-9._\-]+$', seg):
+            return None
+    return p
+
+def _install_published_world(world_id):
+    import urllib.request
+    with urllib.request.urlopen(f"{WORLDS_CDN}/worlds/{world_id}/meta.json", timeout=8) as r:
+        meta = json.loads(r.read())
+    rev = str(meta.get("rev", ""))
+    display = str(meta.get("name", "")) or world_id[:8]
+    files = meta.get("files") or []
+    if not re.match(r'^[0-9a-z]{8,24}$', rev) or not isinstance(files, list) or not files:
+        raise _InstallError(502, "invalid world metadata")
+
+    world_files = [f for f in files if isinstance(f, str)
+                   and f.startswith("worlds/") and f.endswith(".world")]
+    if len(world_files) != 1:
+        raise _InstallError(502, "metadata must contain exactly one worlds/*.world")
+    world_name = world_files[0][len("worlds/"):-len(".world")]
+    if not world_name.startswith("custom_") or not re.match(r'^[\w]+$', world_name):
+        raise _InstallError(502, "world name must be custom_*")
+    if world_name in PROTECTED_NAMES:
+        raise _InstallError(400, "protected world name")
+
+    prev = _pub_sidecar(world_name)
+    if prev and prev.get("rev") == rev and os.path.isfile(os.path.join(WORLDS_DIR, f"{world_name}.world")):
+        return {"ok": True, "world": f"{world_name}.world", "name": display, "cached": True}
+
+    paths = []
+    for p in files:
+        if p == "project.json":
+            continue  # 소스 파일 — 설치 대상 아님
+        sp = _safe_install_path(p)
+        if sp is None:
+            raise _InstallError(502, f"unsafe path in manifest: {str(p)[:80]}")
+        paths.append(sp)
+    if not paths:
+        raise _InstallError(502, "empty manifest")
+
+    # 임시 디렉토리(같은 파일시스템)로 전부 받은 뒤 이동 — 부분 설치 방지
+    tmp = tempfile.mkdtemp(prefix=".pcworld_", dir=SHARE_DIR)
+    try:
+        for p in paths:
+            dst = os.path.join(tmp, p)
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            with urllib.request.urlopen(f"{WORLDS_CDN}/worlds/{world_id}/{rev}/{p}", timeout=30) as r, \
+                 open(dst, "wb") as f:
+                shutil.copyfileobj(r, f, 1024 * 256)
+        _delete_world_files(world_name)
+        for p in paths:
+            dst = os.path.join(SHARE_DIR, p)
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            os.replace(os.path.join(tmp, p), dst)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    _ensure_sky_dome(f"{world_name}.world")
+    _normalize_textures(world_name)
+    with open(_pub_sidecar_path(world_name), "w") as f:
+        json.dump({"world_id": world_id, "rev": rev, "name": display}, f)
+    logging.info("installed published world %s rev %s as %s", world_id, rev, world_name)
+    return {"ok": True, "world": f"{world_name}.world", "name": display, "cached": False}
 
 # Single source of truth for simulation state
 _lock = threading.Lock()
@@ -1383,7 +1479,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 name = os.path.splitext(os.path.basename(w))[0]
                 # Only imported worlds (custom_ prefix) are deletable; everything
                 # else ships with the sim and counts as official.
+                pub = _pub_sidecar(name)
                 items.append({"name": name, "file": os.path.basename(w),
+                              "display": (pub or {}).get("name") or name,
+                              "world_id": (pub or {}).get("world_id"),
                               "deletable": name.startswith("custom_") and name not in PROTECTED_NAMES})
             # Protected (built-in) worlds first, then alphabetical
             items.sort(key=lambda x: (x["deletable"], x["name"]))
@@ -1565,6 +1664,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
             _fail_count = 0
             threading.Thread(target=start_sim, args=(world_file,), daemon=True).start()
             self._json(200, {"ok": True, "world": world_file})
+        elif self.path == "/worlds/install":
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length)) if length else {}
+            world_id = str(body.get("world_id", ""))
+            if not re.match(r'^[0-9a-f]{32}$', world_id):
+                self._json(400, {"error": "invalid world_id"})
+                return
+            try:
+                self._json(200, _install_published_world(world_id))
+            except _InstallError as e:
+                self._json(e.code, {"error": str(e)})
+            except Exception:
+                logging.exception("world install failed: %s", world_id)
+                self._json(502, {"error": "install failed (network or archive error)"})
         elif self.path.split("?", 1)[0] == "/upload":
             content_type = self.headers.get("Content-Type", "")
             content_length = int(self.headers.get("Content-Length", 0))

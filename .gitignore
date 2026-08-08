@@ -6,4 +6,5 @@ share/meshes/custom_*/
 share/models/custom_*/
 share/routes/custom_*.npy
 share/worlds/custom_*.world
+share/worlds/custom_*.pcpub.json
 share/track_iconography/custom_*.png
