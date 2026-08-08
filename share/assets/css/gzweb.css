@@ -4,11 +4,30 @@
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body { background: #1a1a2e; color: #eee; font-family: sans-serif; overflow: hidden; }
-#respawn-btn { position: fixed; top: calc(var(--u)*0.3); left: calc(var(--u)*0.3); z-index: 10; padding: 0 calc(var(--u)*0.6);
-              background: rgba(0,0,0,0.7); border: 1px solid #555; border-radius: calc(var(--u)*0.46); font-size: var(--u);
-              height: calc(var(--u)*2); display: flex; align-items: center; color: #eee; cursor: pointer;
-              transition: background 0.15s, border-color 0.15s; gap: calc(var(--u)*0.15); }
-#respawn-btn:hover:not(:disabled) { background: rgba(60,60,100,0.9); border-color: #888; }
+/* Toolbar: 3-column grid — respawn left, world chip TRUE center regardless
+   of the side widths, settings right. The strip is click-through; only its
+   children take pointer events. */
+#toolbar { position: fixed; top: 0; left: 0; right: 0; z-index: 10;
+           display: grid; grid-template-columns: 1fr auto 1fr;
+           align-items: center; gap: calc(var(--u)*0.46);
+           padding: calc(var(--u)*0.3); pointer-events: none; }
+#toolbar > * { pointer-events: auto; }
+/* Explicit columns: with the chip display:none (embedded) auto-placement
+   would promote settings into the center cell. */
+#respawn-btn { justify-self: start; grid-column: 1; }
+#world-chip { justify-self: center; grid-column: 2; }
+#settings { justify-self: end; grid-column: 3; }
+/* One chip family for every toolbar control — same height, radius and colors
+   at every width. */
+#respawn-btn, #world-chip, #settings {
+  height: calc(var(--u)*2); min-width: calc(var(--u)*2.3);
+  background: rgba(0,0,0,0.7); border: 1px solid #555;
+  border-radius: calc(var(--u)*0.46); color: #eee; cursor: pointer;
+  transition: background 0.15s, border-color 0.15s; padding: 0;
+  font-size: var(--u); }
+#respawn-btn, #settings { display: flex; align-items: center; justify-content: center; }
+#respawn-btn:hover:not(:disabled), #world-chip:hover:not(.disabled),
+#settings:hover { background: rgba(60,60,100,0.9); border-color: #888; }
 #respawn-btn:active:not(:disabled) { background: rgba(40,120,80,0.9); border-color: #4ade80; }
 #respawn-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 #respawn-btn.busy { opacity: 0.6; cursor: wait; }
@@ -19,84 +38,67 @@ body { background: #1a1a2e; color: #eee; font-family: sans-serif; overflow: hidd
 .connected { color: #4ade80; }
 .disconnected { color: #f87171; }
 
-#world-selector { position: fixed; top: calc(var(--u)*0.3); left: 50%; transform: translateX(-50%); z-index: 10;
-                  padding: 0 calc(var(--u)*0.46); background: none; border-radius: calc(var(--u)*0.46); font-size: var(--u);
-                  height: calc(var(--u)*2); display: flex; align-items: center; gap: calc(var(--u)*0.46); }
-#world-selector .switching { color: #facc15; }
-#world-selector button { background: #2a2a4a; color: #eee; border: 1px solid #555; border-radius: calc(var(--u)*0.3);
-                         padding: calc(var(--u)*0.3) calc(var(--u)*0.77); font-size: var(--u); cursor: pointer; }
-#world-selector button:hover { background: #3a3a5a; }
-#world-selector button:disabled { opacity: 0.4; cursor: not-allowed; }
-.dropdown { position: relative; user-select: none; }
-.dropdown-toggle { background: #2a2a4a; color: #eee; border: 1px solid #555; border-radius: calc(var(--u)*0.3);
-                   padding: calc(var(--u)*0.15) calc(var(--u)*1.85) calc(var(--u)*0.15) calc(var(--u)*0.6);
-                   font-size: var(--u); cursor: pointer; width: calc(var(--u)*10.8);
-                   overflow: hidden; text-overflow: ellipsis;
-                   white-space: nowrap; position: relative; }
-.dropdown-toggle::after { content: '\25bc'; position: absolute; right: calc(var(--u)*0.6); top: 50%; transform: translateY(-50%);
-                          font-size: calc(var(--u)*0.7); opacity: 0.6; }
-.dropdown-toggle.disabled { opacity: 0.5; cursor: wait; pointer-events: none; }
-.dropdown-menu { display: none; position: absolute; top: 100%; left: 0; margin-top: calc(var(--u)*0.3);
-                 background: #2a2a4a; border: 1px solid #555; border-radius: calc(var(--u)*0.3);
-                 min-width: 100%; max-height: calc(var(--u)*20); overflow-y: auto; z-index: 200; }
-.dropdown-menu.open { display: block; }
-.dropdown-item { display: flex; align-items: center; justify-content: space-between; padding: calc(var(--u)*0.46) calc(var(--u)*0.6);
-                 cursor: pointer; white-space: nowrap; gap: calc(var(--u)*0.9); font-size: var(--u); }
-.dropdown-item:hover { background: #3a3a5a; }
-.dropdown-item.active { color: #4ade80; }
-.dropdown-item .del-btn { color: #666; font-size: calc(var(--u)*0.9); padding: calc(var(--u)*0.15) calc(var(--u)*0.3); border-radius: calc(var(--u)*0.23);
-                          flex-shrink: 0; line-height: 1; }
-.dropdown-item .del-btn:hover { color: #f87171; background: rgba(248,113,113,0.15); }
-#upload-area { display: none; position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
-               z-index: 100; background: #1e1e3e; border: 2px dashed #555; border-radius: 12px;
-               padding: 30px 40px; text-align: center; min-width: min(360px, 90vw); max-width: 95vw; }
-#upload-area.dragover { border-color: #4ade80; background: #1e2e3e; }
-#upload-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 99; }
-#upload-area input[type="file"] { display: none; }
-#upload-area .btn { background: #3b82f6; color: #fff; border: none; border-radius: 6px;
-                    padding: 8px 20px; font-size: 14px; cursor: pointer; margin-top: 12px; }
-#upload-area .btn:hover { background: #2563eb; }
-#upload-area .btn:disabled { opacity: 0.5; cursor: wait; }
-#upload-area .close { position: absolute; top: 8px; right: 12px; cursor: pointer;
-                      font-size: 20px; color: #888; }
-#upload-area .close:hover { color: #fff; }
-#upload-status { font-size: 14px; min-height: 20px; padding-right: 16px; }
+/* World chip: current world name, true-centered by the grid. Opens the
+   world modal. Block display (not flex) so text-overflow ellipsis works. */
+#world-chip { display: block; line-height: calc(var(--u)*2 - 2px);
+              padding: 0 calc(var(--u)*1.85) 0 calc(var(--u)*0.8);
+              max-width: calc(100vw - var(--u)*12); min-width: calc(var(--u)*3.6);
+              overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+              position: relative; text-align: left; }
+#world-chip::after { content: '\25bc'; position: absolute; right: calc(var(--u)*0.6); top: 50%; transform: translateY(-50%);
+                     font-size: calc(var(--u)*0.7); opacity: 0.6; }
+#world-chip.disabled { opacity: 0.5; cursor: wait; pointer-events: none; }
+#world-chip .switching { color: #facc15; }
 
-/* 앱(/app) 임베드: 자체 툴바 숨김 — 래퍼 패널 헤더가 Respawn/월드/Import 제공 */
-.embedded #respawn-btn, .embedded #world-selector { display: none !important; }
+/* World modal: official/custom sections + import. Replaces the old dropdown
+   and the separate upload dialog. */
+#world-modal-overlay { display: none; position: fixed; inset: 0;
+                       background: rgba(0,0,0,0.6); z-index: 290; }
+#world-modal-overlay.open { display: block; }
+#world-modal { display: none; position: fixed; top: 50%; left: 50%;
+               transform: translate(-50%, -50%); z-index: 300;
+               background: #1e1e3e; border: 1px solid #555;
+               border-radius: calc(var(--u)*0.7); width: min(400px, 92vw);
+               max-height: 82vh; flex-direction: column; overflow: hidden; }
+#world-modal.open { display: flex; }
+.wm-head { display: flex; align-items: center; justify-content: space-between;
+           padding: calc(var(--u)*0.7) calc(var(--u)*1); border-bottom: 1px solid #444;
+           font-weight: 600; font-size: calc(var(--u)*1.08); }
+.wm-close { cursor: pointer; color: #888; font-size: calc(var(--u)*1.5); line-height: 1; }
+.wm-close:hover { color: #fff; }
+.wm-body { overflow-y: auto; flex: 1; padding: calc(var(--u)*0.4) 0; }
+.wm-sec { font-size: calc(var(--u)*0.77); font-weight: 700; letter-spacing: 0.08em;
+          color: #8a8aa8; padding: calc(var(--u)*0.6) calc(var(--u)*1) calc(var(--u)*0.25); }
+.wm-row { display: flex; align-items: center; gap: calc(var(--u)*0.6);
+          padding: calc(var(--u)*0.5) calc(var(--u)*1); cursor: pointer; font-size: var(--u); }
+.wm-row:hover { background: #2e2e52; }
+.wm-row.active { color: #4ade80; }
+.wm-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wm-del { color: #666; font-size: calc(var(--u)*0.9); padding: calc(var(--u)*0.15) calc(var(--u)*0.3);
+          border-radius: calc(var(--u)*0.23); flex-shrink: 0; line-height: 1; }
+.wm-del:hover { color: #f87171; background: rgba(248,113,113,0.15); }
+.wm-confirm { display: flex; align-items: center; gap: calc(var(--u)*0.4);
+              flex-shrink: 0; font-size: calc(var(--u)*0.85); color: #f87171; }
+.wm-confirm button { border: 1px solid #555; background: #2a2a4a; color: #eee;
+                     border-radius: calc(var(--u)*0.3); padding: calc(var(--u)*0.15) calc(var(--u)*0.6);
+                     cursor: pointer; font-size: calc(var(--u)*0.85); }
+.wm-confirm .wm-yes:hover { background: #7f1d1d; border-color: #f87171; }
+.wm-confirm .wm-no:hover { background: #3a3a5a; }
+.wm-empty { color: #666; font-size: calc(var(--u)*0.85); padding: calc(var(--u)*0.2) calc(var(--u)*1) calc(var(--u)*0.5); }
+.wm-foot { border-top: 1px solid #444; padding: calc(var(--u)*0.6) calc(var(--u)*1);
+           display: flex; flex-direction: column; gap: calc(var(--u)*0.4); }
+#wm-import-btn { background: #3b82f6; color: #fff; border: none;
+                 border-radius: calc(var(--u)*0.4); padding: calc(var(--u)*0.5);
+                 font-size: var(--u); cursor: pointer; }
+#wm-import-btn:hover:not(:disabled) { background: #2563eb; }
+#wm-import-btn:disabled { opacity: 0.5; cursor: wait; }
+#wm-status { font-size: calc(var(--u)*0.85); min-height: calc(var(--u)*1.2); color: #aaa; }
+#wm-status.error { color: #f87171; }
+#wm-status.success { color: #4ade80; }
 
-/* Responsive: hide labels when narrow */
-.narrow .bar-label { display: none !important; }
-.narrow #respawn-btn { width: calc(var(--u)*2.3); height: calc(var(--u)*2.3); border-radius: 50%; padding: 0;
-                       background: rgba(0,0,0,0.7); border: 2px solid #555;
-                       justify-content: center; }
-.narrow #respawn-btn:hover:not(:disabled) { background: rgba(60,60,100,0.9); border-color: #888; }
-.narrow #world-selector { background: none; padding: calc(var(--u)*0.3) 0; }
-.narrow #settings { width: calc(var(--u)*2.3); height: calc(var(--u)*2.3); border-radius: 50%; padding: 0;
-                    background: rgba(0,0,0,0.7); border: 2px solid #555;
-                    justify-content: center; }
-.narrow #settings:hover { background: rgba(60,60,100,0.9); border-color: #888; }
-.narrow #settings-btn { padding: 0; gap: 0; }
-/* Text shadow for icon visibility on narrow screens */
-.narrow #respawn-btn .respawn-icon,
-.narrow .dropdown-toggle,
-.narrow .settings-icon {
-  text-shadow: 0 0 3px rgba(0,0,0,0.9), 0 0 6px rgba(0,0,0,0.7), 1px 1px 2px rgba(0,0,0,0.8);
-}
-#import-btn { background: #2a2a4a; color: #eee; border: 1px solid #555; border-radius: calc(var(--u)*0.3);
-              padding: calc(var(--u)*0.15) calc(var(--u)*0.6); font-size: var(--u); cursor: pointer; display: flex; align-items: center; gap: calc(var(--u)*0.15);
-              margin-left: calc(var(--u)*0.46); transition: background 0.15s, border-color 0.15s; }
-#import-btn:hover { background: #3a3a5a; border-color: #888; }
-.import-icon { display: flex; align-items: center; line-height: 1; }
-.import-icon svg { width: calc(var(--u)*1.08); height: calc(var(--u)*1.08); }
-.narrow #import-btn { padding: calc(var(--u)*0.3) calc(var(--u)*0.46); border-radius: calc(var(--u)*0.46); margin-left: calc(var(--u)*0.3);
-                      background: rgba(0,0,0,0.7); border: 2px solid #555; }
-.narrow #import-btn:hover { background: rgba(60,60,100,0.9); border-color: #888; }
-.narrow .import-icon {
-  text-shadow: 0 0 3px rgba(0,0,0,0.9), 0 0 6px rgba(0,0,0,0.7), 1px 1px 2px rgba(0,0,0,0.8);
-}
-#upload-status.error { color: #f87171; }
-#upload-status.success { color: #4ade80; }
+/* App (/app) embed: hide the world chip only — the wrapper's own header owns
+   world selection; respawn and settings stay usable in the iframe. */
+.embedded #world-chip { display: none !important; }
 
 /* Traffic light control panel — 신호등 클릭 시 우측에 세로 신호등 표시.
    원격 신호등 앱과 동일 문법: 꺼진 불 클릭 = 전환, 노랑은 중앙 겹침(z2). */
@@ -129,9 +131,7 @@ body { background: #1a1a2e; color: #eee; font-family: sans-serif; overflow: hidd
 .lp-lamp:not(.lp-yellow):active { transform: translateX(-50%) scale(0.96); }
 
 /* Settings */
-#settings { position: fixed; top: calc(var(--u)*0.3); right: calc(var(--u)*0.3); z-index: 10;
-            background: rgba(0,0,0,0.7); border-radius: calc(var(--u)*0.46); padding: 0 calc(var(--u)*0.15);
-            height: calc(var(--u)*2); display: flex; align-items: center; }
+#settings { position: relative; }
 #settings-btn { background: none; color: #eee; border: none; border-radius: calc(var(--u)*0.3);
                 padding: calc(var(--u)*0.15) calc(var(--u)*0.46); font-size: var(--u); cursor: pointer; display: flex; align-items: center; gap: calc(var(--u)*0.23); }
 .settings-icon { font-size: calc(var(--u)*1.38); font-weight: bold; line-height: 1; }

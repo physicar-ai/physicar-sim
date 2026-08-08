@@ -234,6 +234,34 @@ def _extract_world(tar_path, world_name):
             if member.name in exact or any(member.name.startswith(p) for p in prefixes):
                 tf.extract(member, SHARE_DIR)
     _ensure_sky_dome(f"{world_name}.world")
+    _normalize_textures(world_name)
+
+def _normalize_textures(world_name):
+    """Re-encode image files whose bytes don't match their .png extension.
+
+    World-builder exports store user-uploaded photos verbatim under a .png
+    name. Browsers sniff the real format so gzweb renders them, but Ogre2
+    picks its codec by extension — a JPEG behind ".png" fails to load and
+    the sim camera shows the yellow/black warning texture instead.
+    """
+    from PIL import Image
+    for sub in ("meshes", "models"):
+        root = os.path.join(SHARE_DIR, sub, world_name)
+        for dirpath, _dirs, files in os.walk(root):
+            for fn in files:
+                if not fn.lower().endswith(".png"):
+                    continue
+                p = os.path.join(dirpath, fn)
+                try:
+                    with open(p, "rb") as f:
+                        if f.read(8) == b"\x89PNG\r\n\x1a\n":
+                            continue
+                    img = Image.open(p)
+                    img.load()
+                    img.save(p, "PNG")
+                    logging.info("normalized texture to PNG: %s", p)
+                except Exception:
+                    logging.exception("texture normalize failed: %s", p)
 
 def _delete_world_files(world_name):
     """Delete all files associated with a world."""
@@ -1205,7 +1233,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             items = []
             for w in worlds:
                 name = os.path.splitext(os.path.basename(w))[0]
-                items.append({"name": name, "file": os.path.basename(w), "deletable": name not in PROTECTED_NAMES})
+                # Only imported worlds (custom_ prefix) are deletable; everything
+                # else ships with the sim and counts as official.
+                items.append({"name": name, "file": os.path.basename(w),
+                              "deletable": name.startswith("custom_") and name not in PROTECTED_NAMES})
             # Protected (built-in) worlds first, then alphabetical
             items.sort(key=lambda x: (x["deletable"], x["name"]))
             with _lock:
@@ -1653,7 +1684,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         m = re.match(r'^/worlds/([\w]+)$', self.path)
         if m:
             world_name = m.group(1)
-            if world_name in PROTECTED_NAMES:
+            if world_name in PROTECTED_NAMES or not world_name.startswith("custom_"):
                 self._json(403, {"error": f"cannot delete protected world: {world_name}"})
                 return
             if not os.path.isfile(os.path.join(WORLDS_DIR, f"{world_name}.world")):

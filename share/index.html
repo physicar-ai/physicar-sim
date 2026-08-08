@@ -3,28 +3,25 @@
 <head>
   <meta charset="utf-8" />
   <title>Gazebo Web</title>
-  <link rel="stylesheet" href="assets/css/gzweb.css?v=2">
+  <link rel="stylesheet" href="assets/css/gzweb.css?v=5">
   <script src="assets/lib/protobuf.min.js?v=1"></script>
   <script src="assets/lib/eventemitter2.min.js?v=2"></script>
   <script src="assets/lib/gz.js?v=2"></script>
   <script src="assets/lib/gz3d.js?v=2"></script>
   <script src="assets/js/gz-scene.js?v=4"></script>
   <script src="assets/js/gz-interact.js?v=3"></script>
-  <script src="assets/js/gzweb.js?v=15"></script>
+  <script src="assets/js/gzweb.js?v=29"></script>
 </head>
 <body onload="init()">
+  <!-- Toolbar: 3-column grid — respawn left, world chip TRUE center at any
+       width, settings right. The chip opens the world modal. -->
+  <div id="toolbar">
   <button id="respawn-btn" onclick="doRespawn()" title="Respawn" disabled>
-    <span class="respawn-icon">&#x21bb;</span><span class="bar-label"> Respawn</span>
+    <span class="respawn-icon">&#x21bb;</span>
   </button>
-  <div id="world-selector">
-    <div class="dropdown">
-      <div id="dropdown-toggle" class="dropdown-toggle disabled" onclick="toggleDropdown()">Loading...</div>
-      <div id="dropdown-menu" class="dropdown-menu"></div>
-    </div>
-    <button id="import-btn" onclick="document.getElementById('file-input').click()" title="Import World"><span class="import-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></span><span class="bar-label"> Import</span></button>
-  </div>
+  <button id="world-chip" class="disabled" onclick="openWorldModal()" title="Select world">Loading...</button>
   <div id="settings">
-    <button id="settings-btn" onclick="toggleSettings()" title="Settings"><span class="bar-label">Settings </span><span class="settings-icon">&#x2699;</span></button>
+    <button id="settings-btn" onclick="toggleSettings()" title="Settings"><span class="settings-icon">&#x2699;</span></button>
     <div id="settings-menu">
       <label><input type="checkbox" id="chk-autofollow" onchange="toggleAutoFollow(this.checked); saveSettings()"> Auto Follow</label>
       <label><input type="checkbox" id="chk-grid" onchange="toggleGrid(this.checked); saveSettings()"> Grid</label>
@@ -33,6 +30,7 @@
       <label><input type="checkbox" id="chk-pose" onchange="togglePose(this.checked); saveSettings()"> Pose Info</label>
     </div>
   </div>
+  </div><!-- /#toolbar -->
   <div id="pose-panel"></div>
   <div id="light-panel">
     <div class="lp-head"><span id="lp-name"></span>
@@ -44,12 +42,23 @@
     </div>
   </div>
   <div id="container"></div>
-  <div id="upload-overlay" onclick="closeUpload()"></div>
-  <!-- 진행 표시 전용 (파일 선택은 Import 버튼이 곧장 연다 — 드래그&드롭은 화면 전체) -->
-  <div id="upload-area">
-    <span class="close" onclick="closeUpload()">&times;</span>
-    <input type="file" id="file-input" accept=".tar.gz,.gz" onchange="handleFile(this.files[0])" style="display:none">
-    <div id="upload-status"></div>
+  <!-- World modal: official/custom sections, inline delete confirm (no native
+       dialogs — they are silently dropped inside webviews), import + progress -->
+  <div id="world-modal-overlay" onclick="closeWorldModal()"></div>
+  <div id="world-modal">
+    <div class="wm-head"><span>Worlds</span>
+      <span class="wm-close" onclick="closeWorldModal()">&times;</span></div>
+    <div class="wm-body">
+      <div class="wm-sec">OFFICIAL WORLD</div>
+      <div id="wm-official"></div>
+      <div class="wm-sec">CUSTOM WORLD</div>
+      <div id="wm-custom"></div>
+    </div>
+    <div class="wm-foot">
+      <button id="wm-import-btn" onclick="document.getElementById('file-input').click()">&#x2913; Import World (.tar.gz)</button>
+      <div id="wm-status"></div>
+    </div>
   </div>
+  <input type="file" id="file-input" accept=".tar.gz,.gz" onchange="handleFile(this.files[0])" style="display:none">
 </body>
 </html>
