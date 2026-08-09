@@ -368,6 +368,9 @@ function connect() {
         messageType: "gz.msgs.Pose_V",
         callback: function(msg) {
           var needRefresh = false;
+          // One restamped tick per message — packets bursting in after a
+          // page/network stall get their real spacing back (see _stampPoseTick)
+          var st = _stampPoseTick();
           for (var j = 0; j < msg.pose.length; ++j) {
             var p = msg.pose[j];
             var e = scene.getByName(p.name);
@@ -375,7 +378,7 @@ function connect() {
               // Buffer the timestamped pose; _applyPoseLerp() plays the
               // stream back _POSE_DELAY_MS in the past with linear
               // interpolation between packets (constant velocity, no jumps).
-              _pushPoseSample(p.name, p.position || {}, p.orientation || {});
+              _pushPoseSample(p.name, p.position || {}, p.orientation || {}, st);
             } else if (!knownModels[p.name] && p.name !== currentWorld) {
               needRefresh = true;
             }
@@ -864,18 +867,55 @@ var _POSE_DELAY_MS = 100;  // render this far in the past, linearly interpolatin
                            // playback masks the packet rate completely; exponential
                            // chasing (tried first) ripples at the packet frequency.
 
-function _pushPoseSample(name, pos, ori) {
+// Jitter-buffer restamp for pose packets. When the page or the network
+// stalls (browser jank, tunnel hiccup), the packets buffered during the
+// stall all ARRIVE within a few milliseconds. Stamping them with their
+// arrival time would compress hundreds of ms of motion into a ~0 ms
+// timeline span — playback then interpolates across near-identical
+// timestamps, whipping back and forth between neighboring samples (the
+// "left-right twitch" seen after every freeze). Normal-cadence packets
+// keep their arrival time (the original, proven-smooth path); only burst
+// members are re-spaced — spread FORWARD at ~3x the stream rate so the
+// playback glides once, briskly and smoothly, through the backlog.
+var _poseTick = { p: 50, last: 0, t: 0 };
+function _stampPoseTick() {
+  var now = performance.now();
+  var gap = now - _poseTick.last;
+  _poseTick.last = now;
+  var t;
+  if (gap > 15) {
+    // Normal cadence: trust the arrival clock — identical to the original
+    // behavior, which renders smoothly. Learn the stream period from these
+    // gaps only (burst gaps of ~0 ms must not drag the estimate down).
+    if (gap < 150) { _poseTick.p += (gap - _poseTick.p) * 0.05; }
+    // max() only unwinds a just-finished burst spread that overshot "now":
+    // stamps then advance 8 ms per packet until real time catches up.
+    t = Math.max(now, _poseTick.t + 8);
+  } else {
+    // Burst member — packets released together after a page/network stall.
+    // Spread them FORWARD at ~3x the stream rate: playback glides briskly
+    // and smoothly through the backlog instead of whipping through a
+    // zero-width timeline. Capped so an extreme stall cannot push stamps
+    // far into the future.
+    t = Math.min(_poseTick.t + Math.max(5, _poseTick.p / 3), now + 400);
+  }
+  _poseTick.t = t;
+  return t;
+}
+
+function _pushPoseSample(name, pos, ori, stamp) {
   var q = new THREE.Quaternion(ori.x || 0, ori.y || 0, ori.z || 0,
                                ori.w !== undefined ? ori.w : 1);
-  var s = { t: performance.now(),
+  var s = { t: stamp !== undefined ? stamp : performance.now(),
             x: pos.x || 0, y: pos.y || 0, z: pos.z || 0, q: q };
   var buf = _poseLerp[name];
   if (!buf) { _poseLerp[name] = [s]; return; }
   var last = buf[buf.length - 1];
+  if (s.t <= last.t) { s.t = last.t + 0.1; }   // keep per-name monotonicity
   var dx = s.x - last.x, dy = s.y - last.y, dz = s.z - last.z;
   if (dx * dx + dy * dy + dz * dz > 4) buf.length = 0;  // teleport: snap, don't glide
   buf.push(s);
-  if (buf.length > 12) buf.shift();
+  if (buf.length > 30) buf.shift();   // ~1.2 s at the usual stream rate
 }
 
 function _applyPoseLerp() {
@@ -1718,6 +1758,7 @@ function toggleAutoFollow(on, initial) {
   }
 }
 
+var _afLastMs = 0;
 function _updateAutoFollow() {
   if (!_autoFollow) return;
   if (gzInteract && gzInteract.isManipulating('physicar')) return;
@@ -1725,9 +1766,20 @@ function _updateAutoFollow() {
   if (!obj) return;
   var target = new THREE.Vector3();
   obj.getWorldPosition(target);
+  // TIME-based smoothing factors. Per-frame constants (the original 0.08 /
+  // 0.15) made the smoothing lag proportional to frame time — when the
+  // browser hitches, rAF intervals fluctuate and the heading lag breathes
+  // with them, visibly rocking the camera around the car during a steady
+  // turn. With k = 1 - exp(-dt/tau) the lag is a constant angle for a given
+  // yaw rate no matter the frame rate: the chase view stays rigid.
+  var nowMs = performance.now();
+  var dt = _afLastMs ? Math.min((nowMs - _afLastMs) / 1000, 0.5) : 0.016;
+  _afLastMs = nowMs;
+  var kYaw = 1 - Math.exp(-dt / 0.15);
+  var kZoom = 1 - Math.exp(-dt / 0.11);
   // Smooth zoom interpolation
   if (typeof _af.radiusTarget !== 'undefined') {
-    _af.radius += (_af.radiusTarget - _af.radius) * 0.15;
+    _af.radius += (_af.radiusTarget - _af.radius) * kZoom;
     if (Math.abs(_af.radius - _af.radiusTarget) < 0.001) _af.radius = _af.radiusTarget;
   }
   // Track the vehicle heading with smoothing (shortest angular path) so the
@@ -1736,7 +1788,7 @@ function _updateAutoFollow() {
   var vyaw = _getVehicleYaw(obj);
   if (_af.yaw === null) _af.yaw = vyaw;
   var dyaw = Math.atan2(Math.sin(vyaw - _af.yaw), Math.cos(vyaw - _af.yaw));
-  _af.yaw += dyaw * 0.08;
+  _af.yaw += dyaw * kYaw;
   var th = _af.theta - _af.yaw;
   // Spherical to Cartesian offset (z-up)
   var sp = Math.sin(_af.phi);
