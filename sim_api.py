@@ -255,7 +255,9 @@ def _install_published_world(world_id):
             continue  # 소스 파일 — 설치 대상 아님
         sp = _safe_install_path(p)
         if sp is None:
-            raise _InstallError(502, f"unsafe path in manifest: {str(p)[:80]}")
+            # 모르는 디렉토리/확장자는 조용히 스킵 — 새 매니페스트와의 전방 호환
+            logging.info("install: skipping non-installable path %s", str(p)[:80])
+            continue
         paths.append(sp)
     if not paths:
         raise _InstallError(502, "empty manifest")
@@ -279,8 +281,12 @@ def _install_published_world(world_id):
 
     _ensure_sky_dome(f"{world_name}.world")
     _normalize_textures(world_name)
+    size = meta.get("size")
+    if not (isinstance(size, list) and len(size) == 2
+            and all(isinstance(v, (int, float)) for v in size)):
+        size = None
     with open(_pub_sidecar_path(world_name), "w") as f:
-        json.dump({"world_id": world_id, "rev": rev, "name": display}, f)
+        json.dump({"world_id": world_id, "rev": rev, "name": display, "size": size}, f)
     logging.info("installed published world %s rev %s as %s", world_id, rev, world_name)
     return {"ok": True, "world": f"{world_name}.world", "name": display, "cached": False}
 
@@ -1404,6 +1410,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 items.append({"name": name, "file": os.path.basename(w),
                               "display": (pub or {}).get("name") or name,
                               "world_id": (pub or {}).get("world_id"),
+                              "size": (pub or {}).get("size"),
                               "official": not custom,
                               "deletable": custom and name not in PROTECTED_NAMES})
             # Protected (built-in) worlds first, then alphabetical
