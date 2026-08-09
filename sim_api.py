@@ -14,7 +14,9 @@ SHARE_DIR = os.path.join(SIM_DIR, "share")
 
 def _detect_assets_rev():
     """공식 자산 CDN 리비전 = 정확히 태그 위의 클린 체크아웃일 때 그 태그.
-    dev/더티 트리는 None → 뷰어가 로컬(/sim/meshes) 서빙으로 폴백."""
+    DEV 모드·태그 밖·더티 트리는 None → 뷰어가 로컬(/sim/meshes) 서빙으로 폴백."""
+    if os.environ.get("DEV") == "true":
+        return None   # 개발 중엔 수정한 로컬 파일이 보여야 한다
     try:
         out = subprocess.run(["git", "-C", SIM_DIR, "describe", "--tags",
                               "--exact-match", "--dirty=-dirty"],
@@ -1493,7 +1495,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # 에서 직접 받게 한다 (EC2 10Mbps egress 캡 우회, 엣지 캐시 공유)
             with _lock:
                 world = _current_world
-            pub = _pub_sidecar(world) if world else None
+            # DEV 모드 = 전부 본서버(로컬) 서빙 — 수정한 로컬 파일이 그대로 보여야 한다
+            pub = _pub_sidecar(world) if (world and os.environ.get("DEV") != "true") else None
             self._json(200, {"world": world,
                              "world_id": (pub or {}).get("world_id"),
                              "rev": (pub or {}).get("rev"),
@@ -1533,6 +1536,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                             "websocket": _launch_proc is not None and _launch_proc.poll() is None,
                             "current": _current_world,
                             "switching": _switching,
+                            # 뷰어가 폴링하지 않도록 여기서 푸시 (변경 시에만 전송됨)
+                            "overlay": _overlay_text if time.monotonic() < _overlay_expiry else "",
+                            "brightness": _brightness,
                         }
                     if snap != last:
                         self.wfile.write(f"data: {json.dumps(snap)}\n\n".encode())

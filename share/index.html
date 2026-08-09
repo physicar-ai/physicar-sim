@@ -3,16 +3,56 @@
 <head>
   <meta charset="utf-8" />
   <title>Gazebo Web</title>
-  <link rel="stylesheet" href="assets/css/gzweb.css?v=12">
-  <script src="assets/lib/protobuf.min.js?v=1"></script>
-  <script src="assets/lib/eventemitter2.min.js?v=2"></script>
-  <script src="assets/lib/gz.js?v=2"></script>
-  <script src="assets/lib/gz3d.js?v=2"></script>
-  <script src="assets/js/gz-scene.js?v=4"></script>
-  <script src="assets/js/gz-interact.js?v=3"></script>
-  <script src="assets/js/gzweb.js?v=45"></script>
+  <link rel="stylesheet" href="assets/css/gzweb.css?v=12" id="pc-css">
+  <script>
+  // 정적 자산 로더 — 배포 태그가 R2 에 있으면 worlds.physicar.ai(엣지 캐시)에서,
+  // 아니면 로컬(EC2)에서. worldpub: DEV 모드·태그 밖·더티 트리는 assets_rev 가
+  // 없어 항상 로컬 → 개발 흐름 무변화. complete.json = 업로드 커밋 포인트.
+  (function () {
+    var FILES = [
+      'assets/lib/protobuf.min.js?v=1',
+      'assets/lib/eventemitter2.min.js?v=2',
+      'assets/lib/gz.js?v=2',
+      'assets/lib/gz3d.js?v=2',
+      'assets/js/gz-scene.js?v=4',
+      'assets/js/gz-interact.js?v=3',
+      'assets/js/gzweb.js?v=46'
+    ];
+    var ready = { dom: document.readyState !== 'loading', js: false };
+    function maybeInit() {
+      if (ready.dom && ready.js && typeof window.init === 'function') { window.init(); }
+    }
+    document.addEventListener('DOMContentLoaded', function () { ready.dom = true; maybeInit(); });
+    function start(base) {
+      if (base) {
+        var css = document.getElementById('pc-css');
+        css.href = base + css.getAttribute('href');
+      }
+      FILES.forEach(function (f, i) {
+        var s = document.createElement('script');
+        s.src = (base || '') + f;
+        s.async = false;   // ordered async — 실행 순서 보장
+        if (i === FILES.length - 1) {
+          s.onload = function () { ready.js = true; maybeInit(); };
+        }
+        document.head.appendChild(s);
+      });
+    }
+    fetch('/sim/api/worldpub')
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (!d || !d.assets_rev) { return ''; }
+        var base = (d.cdn || 'https://worlds.physicar.ai') + '/sim-assets/' + d.assets_rev + '/';
+        return fetch(base + 'complete.json')
+          .then(function (r) { return r.ok ? base : ''; })
+          .catch(function () { return ''; });
+      })
+      .catch(function () { return ''; })
+      .then(start);
+  })();
+  </script>
 </head>
-<body onload="init()">
+<body>
   <!-- Toolbar: 3-column grid — respawn left, world chip TRUE center at any
        width, settings right. The chip opens the world modal. -->
   <div id="toolbar">

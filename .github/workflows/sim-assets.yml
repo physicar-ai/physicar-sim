@@ -41,6 +41,8 @@ jobs:
           # 태그 경로는 불변이라 캐시 퍼지가 필요 없다.
           aws s3 sync share/meshes "${DEST}/meshes" --endpoint-url "$R2_ENDPOINT" \
             --exclude "custom_*" --exclude "custom_*/*" --no-progress
+          # 뷰어 정적 자산(JS/CSS/lib/media)도 같은 태그 경로로 — index.html 로더가 사용
+          aws s3 sync share/assets "${DEST}/assets" --endpoint-url "$R2_ENDPOINT" --no-progress
           echo "{\"tag\":\"${TAG}\",\"uploadedAt\":$(date -u +%s)}" > /tmp/complete.json
           aws s3 cp /tmp/complete.json "${DEST}/complete.json" --endpoint-url "$R2_ENDPOINT" \
             --content-type application/json --no-progress

@@ -75,21 +75,32 @@ var _audioOverlayCheck = setInterval(function() {
 // Status Overlay — free text pushed by user scripts (POST /sim/api/overlay)
 // =====================================================================
 var _statusOverlayLast = '';
-setInterval(function() {
-  fetch('/sim/api/overlay').then(function(r){return r.json()}).then(function(d) {
-    var text = d.text || '';
-    if (text === _statusOverlayLast) return;
-    _statusOverlayLast = text;
-    var el = document.getElementById('status-overlay');
-    if (!el) {
-      el = document.createElement('div');
-      el.id = 'status-overlay';
-      document.body.appendChild(el);
-    }
-    el.textContent = text;
-    el.classList.toggle('show', !!text);
-  }).catch(function(){});
-}, 500);
+function _applyOverlayText(text) {
+  text = text || '';
+  if (text === _statusOverlayLast) return;
+  _statusOverlayLast = text;
+  var el = document.getElementById('status-overlay');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'status-overlay';
+    document.body.appendChild(el);
+  }
+  el.textContent = text;
+  el.classList.toggle('show', !!text);
+}
+// 오버레이·밝기는 SSE(/sim/api/events) 푸시로 받는다 — HTTP 폴링 금지.
+// (모든 요청이 게이트웨이 Worker 를 지나므로 폴링은 유저 규모에서 비용 직격)
+// 첫 스냅샷이 접속 즉시 오므로 초기값도 이걸로 충분하고, 끊기면 브라우저가 자동 재연결.
+(function _startPcEvents() {
+  var es;
+  try { es = new EventSource('/sim/api/events'); } catch (e) { return; }
+  es.onmessage = function (ev) {
+    var d;
+    try { d = JSON.parse(ev.data); } catch (e) { return; }
+    if (typeof d.overlay === 'string') { _applyOverlayText(d.overlay); }
+    if (typeof d.brightness === 'number') { _applyRemoteBrightness(d.brightness); }
+  };
+})();
 
 // =====================================================================
 // Scene Management
@@ -507,7 +518,7 @@ function init() {
       });
     } catch (e) { /* 방어적 */ }
   }
-  function _groundUpkeep() { applyDecalLift(); applyTextureAniso(); _syncBrightness(); }
+  function _groundUpkeep() { applyDecalLift(); applyTextureAniso(); applyViewerBrightness(); }
   setTimeout(_groundUpkeep, 3000);
   setInterval(_groundUpkeep, 5000);
   cam.position.x = 0; cam.position.y = -1.2; cam.position.z = 0.6;
@@ -937,21 +948,17 @@ function setBrightness(v) {
       body: JSON.stringify({ value: _brightFactor }) }).catch(function () {});
   }, 250);
 }
-function _syncBrightness() {
-  fetch("/sim/api/brightness").then(function (r) { return r.json(); }).then(function (d) {
-    if (!d || !d.value) return;
-    var slider = document.getElementById("brightness-slider");
-    if (document.activeElement === slider) return;   // don't fight a drag
-    if (Math.abs(d.value - _brightFactor) > 0.01) {
-      _brightFactor = +d.value;
-      slider.value = d.value;
-      document.getElementById("brightness-val").textContent = (+d.value).toFixed(1);
-    }
-    // also re-grips lights created after a world switch
-    applyViewerBrightness();
-  }).catch(function () {});
+function _applyRemoteBrightness(v) {
+  if (!v) { return; }
+  var slider = document.getElementById("brightness-slider");
+  if (document.activeElement === slider) { return; }   // don't fight a drag
+  if (Math.abs(v - _brightFactor) > 0.01) {
+    _brightFactor = +v;
+    slider.value = v;
+    document.getElementById("brightness-val").textContent = (+v).toFixed(1);
+  }
+  applyViewerBrightness();
 }
-_syncBrightness();
 
 setTimeout(loadWorlds, 500);
 document.addEventListener("keydown", function(e) {
