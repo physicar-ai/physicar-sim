@@ -523,7 +523,26 @@ function init() {
       });
     } catch (e) { /* 방어적 */ }
   }
-  function _groundUpkeep() { applyDecalLift(); applyTextureAniso(); applyViewerBrightness(); }
+  // 로드에 실패한 텍스처(image undefined) 정리 — 방치하면 렌더러가 매 프레임
+  // "Texture marked for update but image is undefined" 를 찍어 콘솔을 플러딩한다.
+  // 15초의 로딩 유예 후에도 이미지가 없으면 맵을 떼고 단색으로 렌더.
+  function _dropDeadTextures() {
+    var now = Date.now();
+    scene.scene.traverse(function(o) {
+      if (!o.material) { return; }
+      var mats = Array.isArray(o.material) ? o.material : [o.material];
+      mats.forEach(function(m) {
+        if (!m.map) { return; }
+        if (m.map.image) { m.map.__pcFirstSeen = 0; return; }
+        if (!m.map.__pcFirstSeen) { m.map.__pcFirstSeen = now; return; }
+        if (now - m.map.__pcFirstSeen > 15000) {
+          m.map = null;
+          m.needsUpdate = true;
+        }
+      });
+    });
+  }
+  function _groundUpkeep() { applyDecalLift(); applyTextureAniso(); applyViewerBrightness(); _dropDeadTextures(); }
   setTimeout(_groundUpkeep, 3000);
   setInterval(_groundUpkeep, 5000);
   cam.position.x = 0; cam.position.y = -1.2; cam.position.z = 0.6;
@@ -2420,12 +2439,16 @@ var gzScene = GzScene.create({
       }))
       .then(function(text) {
         // 공용 트랙 텍스처(../world_builder/textures/*)는 월드 rev 업로드에 없다
-        // (설치 계약 — sim 내장 공용 디렉토리 참조). CDN DAE 를 파싱할 땐 이 상대
-        // 참조를 공용 자산 경로(sim-assets, 전 월드가 캐시 공유)로 재작성한다.
-        if (_pubWorld && url.indexOf(_pubWorld.base) === 0) {
-          var common = _simAssets ? _simAssets + 'meshes/world_builder/'
-                                  : '/sim/meshes/world_builder/';
-          text = text.split('../world_builder/').join(common);
+        // (설치 계약 — sim 내장 공용 디렉토리 참조). CDN DAE 를 파싱할 땐 이 참조를
+        // 같은 호스트의 공용 자산 경로(sim-assets, 전 월드 캐시 공유)로 재작성한다.
+        // r86 ColladaLoader 는 init_from 을 baseUrl 에 무조건 이어붙이므로 절대 URL 은
+        // 못 쓴다 — ../ 등반 상대경로(worlds/<id>/<rev>/meshes/<track>/ = 5단계)로 붙이고
+        // 최종 정규화는 브라우저 fetch 가 한다. sim-assets 미가용 코너에선 재작성하지
+        // 않는다 (404 → _dropDeadTextures 가 단색 강등).
+        if (_pubWorld && url.indexOf(_pubWorld.base) === 0 && _simAssets) {
+          var simPath = _simAssets.replace(/^https?:\/\/[^/]+/, '');
+          text = text.split('../world_builder/')
+            .join('../../../../..' + simPath + 'meshes/world_builder/');
         }
         _enqueueParse(function() {
           // FRESH loader per file — THREE's ColladaLoader is not reentrant
