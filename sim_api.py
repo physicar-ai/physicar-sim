@@ -181,6 +181,7 @@ def _delete_world_files(world_name):
     paths = [
         os.path.join(WORLDS_DIR, f"{world_name}.world"),
         os.path.join(WORLDS_DIR, f"{world_name}.pcpub.json"),
+        os.path.join(WORLDS_DIR, f"{world_name}.evaluation.json"),
         os.path.join(SHARE_DIR, "models", world_name),
         os.path.join(SHARE_DIR, "meshes", world_name),
         os.path.join(SHARE_DIR, "routes", f"{world_name}.npy"),
@@ -212,6 +213,20 @@ def _pub_sidecar(world_name):
     try:
         with open(_pub_sidecar_path(world_name)) as f:
             return json.load(f)
+    except Exception:
+        return None
+
+def _eval_sidecar_path(world_name):
+    """월드별 평가 사이드카 — 번들 루트의 evaluation.json 을 pcpub 사이드카와
+    같은 관례로 월드 이름에 매어 보관한다 (루트 공유 파일이면 월드끼리 충돌)."""
+    return os.path.join(WORLDS_DIR, f"{world_name}.evaluation.json")
+
+def _eval_config(world_name):
+    """설치된 평가(evaluation.json) 로드 — 없거나 깨졌으면 None."""
+    try:
+        with open(_eval_sidecar_path(world_name)) as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) and isinstance(d.get("script"), str) else None
     except Exception:
         return None
 
@@ -253,9 +268,13 @@ def _install_published_world(world_id):
         return {"ok": True, "world": f"{world_name}.world", "name": display, "cached": True}
 
     paths = []
+    has_eval = False
     for p in files:
         if p == "project.json":
             continue  # 소스 파일 — 설치 대상 아님
+        if p == "evaluation.json":
+            has_eval = True  # 번들 루트 파일 — 월드별 사이드카로 별도 배치
+            continue
         sp = _safe_install_path(p)
         if sp is None:
             # 모르는 디렉토리/확장자는 조용히 스킵 — 새 매니페스트와의 전방 호환
@@ -274,11 +293,17 @@ def _install_published_world(world_id):
             with urllib.request.urlopen(f"{WORLDS_CDN}/worlds/{world_id}/{rev}/{p}", timeout=30) as r, \
                  open(dst, "wb") as f:
                 shutil.copyfileobj(r, f, 1024 * 256)
+        if has_eval:
+            with urllib.request.urlopen(f"{WORLDS_CDN}/worlds/{world_id}/{rev}/evaluation.json", timeout=30) as r, \
+                 open(os.path.join(tmp, "evaluation.json"), "wb") as f:
+                shutil.copyfileobj(r, f, 1024 * 256)
         _delete_world_files(world_name)
         for p in paths:
             dst = os.path.join(SHARE_DIR, p)
             os.makedirs(os.path.dirname(dst), exist_ok=True)
             os.replace(os.path.join(tmp, p), dst)
+        if has_eval:
+            os.replace(os.path.join(tmp, "evaluation.json"), _eval_sidecar_path(world_name))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -292,6 +317,120 @@ def _install_published_world(world_id):
         json.dump({"world_id": world_id, "rev": rev, "name": display, "size": size}, f)
     logging.info("installed published world %s rev %s as %s", world_id, rev, world_name)
     return {"ok": True, "world": f"{world_name}.world", "name": display, "cached": False}
+
+# ── Evaluation run executor — 학생 프로세스 실행/중지 + 출력 SSE 중계 ──
+# 시간초과 판정의 진실은 브라우저 러너(sim time 기준 실격)다. 여기의 wall-clock
+# 데드라인은 러너(탭)가 죽었을 때 프로세스가 영원히 남는 것을 막는 백스톱일 뿐
+# — RTF<1 이면 sim time 이 wall 보다 느리므로 넉넉히 (×2 + 30s) 잡는다.
+_RUN_DEFAULT_COMMAND = "python3 /home/physicar/physicar_ws/run.py"
+_RUN_LINE_MAX = 300     # 로그 한 줄 길이 상한
+_RUN_RATE_MAX = 30      # 스트림별 초당 로그 라인 상한 (초과분 드롭 + 요약 1줄)
+_run_lock = threading.Lock()
+_run_proc = None        # subprocess.Popen — 프로세스 그룹 리더 (bash -lc)
+_run_exit = None        # 마지막 종료 코드 (None = 미실행 또는 실행 중)
+_run_events = []        # [(seq, payload)] 링 — /events 의 event:run 프레임 소스
+_run_seq = 0
+
+def _run_emit(payload):
+    global _run_seq
+    with _run_lock:
+        _run_seq += 1
+        _run_events.append((_run_seq, payload))
+        del _run_events[:-200]
+
+def _run_events_since(cursor):
+    """cursor 이후의 run 이벤트와 새 cursor. SSE 루프가 커넥션별로 드레인한다."""
+    with _run_lock:
+        return [p for s, p in _run_events if s > cursor], _run_seq
+
+def _run_state():
+    with _run_lock:
+        alive = _run_proc is not None and _run_proc.poll() is None
+        return {"running": alive, "exit_code": None if alive else _run_exit}
+
+def _run_start(command, wall_limit):
+    """학생 프로세스 시작. 이미 실행 중이면 False. bash -lc — 로그인 셸이라
+    ~ 전개와 ROS 환경(bashrc)이 학생 터미널과 동일하게 잡힌다."""
+    global _run_proc, _run_exit
+    with _run_lock:
+        if _run_proc is not None and _run_proc.poll() is None:
+            return False
+        proc = subprocess.Popen(["bash", "-lc", command],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, errors="replace",
+                                start_new_session=True,
+                                cwd=os.path.expanduser("~"))
+        _run_proc = proc
+        _run_exit = None
+
+    def pump(stream, name):
+        win_start, win_count, dropped = time.monotonic(), 0, 0
+        for line in stream:
+            now = time.monotonic()
+            if now - win_start >= 1.0:
+                if dropped:
+                    _run_emit({"phase": "log", "stream": name,
+                               "line": f"... ({dropped} lines dropped)", "truncated": True})
+                win_start, win_count, dropped = now, 0, 0
+            if win_count >= _RUN_RATE_MAX:
+                dropped += 1
+                continue
+            win_count += 1
+            _run_emit({"phase": "log", "stream": name, "line": line.rstrip("\n")[:_RUN_LINE_MAX]})
+        try:
+            stream.close()
+        except Exception:
+            pass
+
+    def watch():
+        rc = proc.wait()
+        global _run_exit
+        with _run_lock:
+            _run_exit = rc
+        _run_emit({"phase": "exit", "exit_code": rc})
+
+    def backstop():
+        deadline = time.monotonic() + wall_limit
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                return
+            time.sleep(1)
+        if proc.poll() is None:
+            logging.warning("evaluation run backstop kill after %.0fs", wall_limit)
+            _run_kill(proc)
+
+    threading.Thread(target=pump, args=(proc.stdout, "stdout"), daemon=True).start()
+    threading.Thread(target=pump, args=(proc.stderr, "stderr"), daemon=True).start()
+    threading.Thread(target=watch, daemon=True).start()
+    threading.Thread(target=backstop, daemon=True).start()
+    return True
+
+def _run_kill(proc):
+    """프로세스 그룹 전체 SIGTERM → 3초 유예 → SIGKILL (자식 프로세스까지)."""
+    try:
+        pgid = os.getpgid(proc.pid)
+    except Exception:
+        return
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except Exception:
+        pass
+
+    def force():
+        time.sleep(3)
+        if proc.poll() is None:
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except Exception:
+                pass
+    threading.Thread(target=force, daemon=True).start()
+
+def _run_stop():
+    """멱등 중지 — 안 돌고 있어도 조용히 성공."""
+    with _run_lock:
+        proc = _run_proc
+    if proc is not None and proc.poll() is None:
+        _run_kill(proc)
 
 # Single source of truth for simulation state
 _lock = threading.Lock()
@@ -1401,6 +1540,73 @@ class Handler(http.server.BaseHTTPRequestHandler):
                              "assets_rev": ASSETS_REV,
                              "static_rev": STATIC_REV,
                              "cdn": WORLDS_CDN})
+        elif self.path == "/evaluation":
+            # 현재 월드의 평가 문서 (WB publish 가 동봉한 evaluation.json 원문)
+            with _lock:
+                world = _current_world
+            if not world:
+                self._json(404, {"error": "no world running"})
+                return
+            doc = _eval_config(world)
+            if doc is None:
+                self._json(404, {"error": "world has no evaluation"})
+                return
+            self._json(200, doc)
+        elif self.path == "/state":
+            # 변동 상태 스냅샷 — 스트림(gz ws pose·stats, SSE)이 흘리는 것들의
+            # "지금 값"을 한 콜로. 불변 정의는 GET /world 가 담당한다.
+            with _lock:
+                world = _current_world
+                switching = _switching
+                running = _sim_proc is not None and _sim_proc.poll() is None
+                overlay = _overlay_text if time.monotonic() < _overlay_expiry else ""
+                bright = _brightness
+                lights = []
+                now_t = time.time()
+                for n, s in sorted(_lights.items()):
+                    ld = {"name": n, **s}
+                    u = ld.pop("yellow_until", None)
+                    if u is not None:
+                        ld["yellow_left"] = round(max(0.0, u - now_t), 1)
+                    lights.append(ld)
+            with _gz_cache_lock:
+                clock = dict(_gz_clock)
+            vehicle = _get_vehicle_pose(world) if world else None
+            objects = _get_dynamic_poses(world) if world else {}
+            objects.pop(VEHICLE_NAME, None)   # 차량은 vehicle 키로 — 물체 맵과 분리
+            self._json(200, {
+                "world": world, "running": running, "switching": switching,
+                "time": clock.get("sim_time"), "paused": clock.get("paused", False),
+                "rtf": clock.get("rtf"),
+                "vehicle": vehicle, "objects": objects, "lights": lights,
+                "overlay": overlay, "brightness": bright,
+                "run": _run_state(),
+            })
+        elif self.path == "/world":
+            # 불변 정의 스냅샷 — 현재 월드의 정체성·트랙 기하·물체 카탈로그.
+            # 월드가 바뀔 때만 달라진다 (접속 후 1회 로드용).
+            with _lock:
+                world = _current_world
+            if not world:
+                self._json(404, {"error": "no world running"})
+                return
+            pub = _pub_sidecar(world)
+            route = _get_route_full(world)
+            bounds = _get_track_bounds(world)
+            catalog = {}
+            for it in (_get_builtin_obstacles(world) or []):
+                catalog[it["name"]] = {k: v for k, v in it.items()
+                                       if k in ("type", "static", "movable", "origin", "size")}
+            self._json(200, {
+                "world": world,
+                "world_id": (pub or {}).get("world_id"),
+                "rev": (pub or {}).get("rev"),
+                "display": (pub or {}).get("name")
+                           or OFFICIAL_WORLD_NAMES.get(world) or world,
+                "track": {"route": route, "bounds": bounds},
+                "objects": catalog,
+                "evaluation": os.path.isfile(_eval_sidecar_path(world)),
+            })
         elif self.path == "/worlds":
             worlds = sorted(glob.glob(os.path.join(WORLDS_DIR, "*.world")))
             items = []
@@ -1416,6 +1622,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                               "world_id": (pub or {}).get("world_id"),
                               "size": (pub or {}).get("size"),
                               "official": not custom,
+                              "evaluation": os.path.isfile(_eval_sidecar_path(name)),
                               "deletable": custom and name not in PROTECTED_NAMES})
             # Protected (built-in) worlds first, then alphabetical
             items.sort(key=lambda x: (x["deletable"], x["name"]))
@@ -1424,13 +1631,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._json(200, {"worlds": items, "current": current})
         elif self.path == "/events":
             # SSE: push a status snapshot whenever it changes, so clients
-            # (e.g. the app.physicar world select) need no polling
+            # (e.g. the app.physicar world select) need no polling.
+            # 프레임에는 이름표(event:)가 붙는다 — 'state' = 전체 상태 스냅샷,
+            # 'run' = 학생 프로세스 이벤트(start/log/exit). 모르는 이벤트 이름은
+            # 무시가 계약 (addEventListener 기반 소비자는 자동으로 그렇게 된다).
+            # 새 종류는 항상 새 event 이름으로 추가한다 — state 키 확장 금지.
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-cache")
             self.send_header("X-Accel-Buffering", "no")   # no proxy buffering
             self.end_headers()
             last, last_beat = None, time.monotonic()
+            _, run_cursor = _run_events_since(0)   # 접속 이후의 run 이벤트만
             try:
                 while True:
                     with _lock:
@@ -1456,15 +1668,24 @@ class Handler(http.server.BaseHTTPRequestHandler):
                             # 조회)을 없애기 위해 스냅샷에 포함 (변경 시에만 전송)
                             "lights": lights,
                         }
+                    wrote = False
                     if snap != last:
-                        self.wfile.write(f"data: {json.dumps(snap)}\n\n".encode())
+                        self.wfile.write(f"event: state\ndata: {json.dumps(snap)}\n\n".encode())
+                        last = snap
+                        wrote = True
+                    run_evs, run_cursor = _run_events_since(run_cursor)
+                    for ev in run_evs:
+                        self.wfile.write(f"event: run\ndata: {json.dumps(ev)}\n\n".encode())
+                        wrote = True
+                    if wrote:
                         self.wfile.flush()
-                        last, last_beat = snap, time.monotonic()
+                        last_beat = time.monotonic()
                     elif time.monotonic() - last_beat > 15:
                         self.wfile.write(b": keep-alive\n\n")   # comment ping
                         self.wfile.flush()
                         last_beat = time.monotonic()
-                    time.sleep(1)
+                    # 0.25s — run 로그의 체감 실시간성 (state 스냅샷 비교는 값싸다)
+                    time.sleep(0.25)
             except (BrokenPipeError, ConnectionResetError):
                 return
         elif self.path == "/status":
@@ -1641,6 +1862,35 @@ class Handler(http.server.BaseHTTPRequestHandler):
             except Exception:
                 logging.exception("world install failed: %s", world_id)
                 self._json(502, {"error": "install failed (network or archive error)"})
+        elif self.path == "/evaluation/run":
+            # 학생 프로세스 시작 — command/time_limit_s 생략 시 현재 월드의
+            # evaluation.json 값, 그것도 없으면 플랫폼 기본값.
+            with _lock:
+                world = _current_world
+                switching = _switching
+            if not world or switching:
+                self._json(409, {"error": "world not ready"})
+                return
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length)) if length else {}
+            cfg = ((_eval_config(world) or {}).get("config") or {})
+            command = body.get("command") or cfg.get("run_command") or _RUN_DEFAULT_COMMAND
+            if not isinstance(command, str) or not command.strip() or len(command) > 200:
+                self._json(400, {"error": "invalid command"})
+                return
+            tl = body.get("time_limit_s") or cfg.get("time_limit_s") or 180
+            if not isinstance(tl, (int, float)) or not (10 <= tl <= 3600):
+                self._json(400, {"error": "time_limit_s must be 10-3600"})
+                return
+            if not _run_start(command.strip(), wall_limit=tl * 2 + 30):
+                self._json(409, {"error": "already running"})
+                return
+            _run_emit({"phase": "start", "command": command.strip()})
+            logging.info("evaluation run started: %s", command.strip()[:120])
+            self._json(200, {"ok": True})
+        elif self.path == "/evaluation/stop":
+            _run_stop()   # 멱등 — 안 돌고 있어도 성공
+            self._json(200, {"ok": True})
         elif self.path == "/pose":
             # 차량 텔레포트 — 생략된 좌표는 현재 포즈 유지.
             # z=0.05·roll/pitch=0 으로 정규화: 뒤집힌/올라탄 차를 일으켜 세우는 동작 겸용.

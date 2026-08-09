@@ -94,13 +94,15 @@ function _applyOverlayText(text) {
 (function _startPcEvents() {
   var es;
   try { es = new EventSource('/sim/api/events'); } catch (e) { return; }
-  es.onmessage = function (ev) {
+  // SSE 는 이름표 있는 이벤트(event: state / run / ...)로 온다 — 아는 이름만
+  // 구독하고 모르는 이름은 무시가 계약 (addEventListener 가 자동으로 보장)
+  es.addEventListener('state', function (ev) {
     var d;
     try { d = JSON.parse(ev.data); } catch (e) { return; }
     if (typeof d.overlay === 'string') { _applyOverlayText(d.overlay); }
     if (typeof d.brightness === 'number') { _applyRemoteBrightness(d.brightness); }
     if (Array.isArray(d.lights)) { _applyLightsSnapshot(d.lights); }
-  };
+  });
 })();
 
 // =====================================================================
