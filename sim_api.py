@@ -12,11 +12,26 @@ logging.basicConfig(
 SIM_DIR = os.path.dirname(os.path.abspath(__file__))
 SHARE_DIR = os.path.join(SIM_DIR, "share")
 
-def _detect_assets_rev():
-    """공식 자산 CDN 리비전 = 정확히 태그 위의 클린 체크아웃일 때 그 태그.
-    DEV 모드·태그 밖·더티 트리는 None → 뷰어가 로컬(/sim/meshes) 서빙으로 폴백."""
+def _nearest_tag():
+    """콘텐츠 자산(차량·월드 메시/텍스처) CDN 리비전 = 가장 가까운 태그.
+    DEV·더티 여부와 무관 — 시뮬레이터 콘텐츠는 개발 대상이 아니라 항상 CDN.
+    (코드성 정적 파일은 STATIC_REV 의 엄격 조건을 따로 탄다)
+    태그가 없으면 None → 로컬 폴백. 미업로드 태그는 뷰어의 complete.json 게이트가 거른다."""
+    try:
+        out = subprocess.run(["git", "-C", SIM_DIR, "describe", "--tags", "--abbrev=0"],
+                             capture_output=True, text=True, timeout=5)
+        tag = out.stdout.strip()
+        if out.returncode == 0 and re.match(r'^v[0-9][\w.\-]*$', tag):
+            return tag
+    except Exception:
+        pass
+    return None
+
+def _detect_static_rev():
+    """코드성 정적 파일(뷰어 JS/CSS — index.html 로더) CDN 리비전.
+    DEV 모드·태그 밖·더티 트리는 None → 로컬 서빙 (개발 중 수정이 그대로 보여야 한다)."""
     if os.environ.get("DEV") == "true":
-        return None   # 개발 중엔 수정한 로컬 파일이 보여야 한다
+        return None
     try:
         out = subprocess.run(["git", "-C", SIM_DIR, "describe", "--tags",
                               "--exact-match", "--dirty=-dirty"],
@@ -28,7 +43,8 @@ def _detect_assets_rev():
         pass
     return None
 
-ASSETS_REV = _detect_assets_rev()
+ASSETS_REV = _nearest_tag()
+STATIC_REV = _detect_static_rev()
 WORLDS_DIR = os.path.join(SHARE_DIR, "worlds")
 DEFAULT_WORLD = "physicar_base.world"
 # Last successfully started world, persisted across restarts/reboots
@@ -1495,12 +1511,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # 에서 직접 받게 한다 (EC2 10Mbps egress 캡 우회, 엣지 캐시 공유)
             with _lock:
                 world = _current_world
-            # DEV 모드 = 전부 본서버(로컬) 서빙 — 수정한 로컬 파일이 그대로 보여야 한다
-            pub = _pub_sidecar(world) if (world and os.environ.get("DEV") != "true") else None
+            pub = _pub_sidecar(world) if world else None
             self._json(200, {"world": world,
                              "world_id": (pub or {}).get("world_id"),
                              "rev": (pub or {}).get("rev"),
                              "assets_rev": ASSETS_REV,
+                             "static_rev": STATIC_REV,
                              "cdn": WORLDS_CDN})
         elif self.path == "/worlds":
             worlds = sorted(glob.glob(os.path.join(WORLDS_DIR, "*.world")))

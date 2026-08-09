@@ -2419,6 +2419,14 @@ var gzScene = GzScene.create({
         return r.text();
       }))
       .then(function(text) {
+        // 공용 트랙 텍스처(../world_builder/textures/*)는 월드 rev 업로드에 없다
+        // (설치 계약 — sim 내장 공용 디렉토리 참조). CDN DAE 를 파싱할 땐 이 상대
+        // 참조를 공용 자산 경로(sim-assets, 전 월드가 캐시 공유)로 재작성한다.
+        if (_pubWorld && url.indexOf(_pubWorld.base) === 0) {
+          var common = _simAssets ? _simAssets + 'meshes/world_builder/'
+                                  : '/sim/meshes/world_builder/';
+          text = text.split('../world_builder/').join(common);
+        }
         _enqueueParse(function() {
           // FRESH loader per file — THREE's ColladaLoader is not reentrant
           // (parse state lives on the instance, and world-builder daes reuse

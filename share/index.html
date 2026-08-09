@@ -16,7 +16,7 @@
       'assets/lib/gz3d.js?v=2',
       'assets/js/gz-scene.js?v=4',
       'assets/js/gz-interact.js?v=3',
-      'assets/js/gzweb.js?v=49'
+      'assets/js/gzweb.js?v=50'
     ];
     var ready = { dom: document.readyState !== 'loading', js: false };
     function maybeInit() {
@@ -41,8 +41,8 @@
     fetch('/sim/api/worldpub')
       .then(function (r) { return r.json(); })
       .then(function (d) {
-        if (!d || !d.assets_rev) { return ''; }
-        var base = (d.cdn || 'https://worlds.physicar.ai') + '/sim-assets/' + d.assets_rev + '/';
+        if (!d || !d.static_rev) { return ''; }
+        var base = (d.cdn || 'https://worlds.physicar.ai') + '/sim-assets/' + d.static_rev + '/';
         return fetch(base + 'complete.json')
           .then(function (r) { return r.ok ? base : ''; })
           .catch(function () { return ''; });
