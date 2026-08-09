@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <title>Gazebo Web</title>
-  <link rel="stylesheet" href="assets/css/gzweb.css?v=12" id="pc-css">
+  <link rel="stylesheet" href="assets/css/gzweb.css?v=13" id="pc-css">
   <script>
   // 정적 자산 로더 — 배포 태그가 R2 에 있으면 worlds.physicar.ai(엣지 캐시)에서,
   // 아니면 로컬(EC2)에서. worldpub: DEV 모드·태그 밖·더티 트리는 assets_rev 가
@@ -16,7 +16,7 @@
       'assets/lib/gz3d.js?v=2',
       'assets/js/gz-scene.js?v=4',
       'assets/js/gz-interact.js?v=3',
-      'assets/js/gzweb.js?v=52'
+      'assets/js/gzweb.js?v=53'
     ];
     var ready = { dom: document.readyState !== 'loading', js: false };
     function maybeInit() {
@@ -99,11 +99,9 @@
       <div id="wm-custom"></div>
     </div>
     <div class="wm-foot">
-      <button id="wm-import-btn" onclick="document.getElementById('file-input').click()">&#x2913; Import World (.tar.gz)</button>
       <div id="wm-status"></div>
     </div>
   </div>
-  <input type="file" id="file-input" accept=".tar.gz,.gz" onchange="handleFile(this.files[0])" style="display:none">
   <!-- Mouse-controls hint, shown on every load: dismissed by any click, the X, or a 10 s timeout -->
   <div id="mouse-hint">
     <div class="mh-card">

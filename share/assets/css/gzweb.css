@@ -76,6 +76,7 @@ body { background: #1a1a2e; color: #eee; font-family: sans-serif; overflow: hidd
 .wm-row:hover { background: #2e2e52; }
 .wm-row.active { color: #4ade80; }
 .wm-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wm-idtag { color: #666; font-size: calc(var(--u)*0.75); font-family: monospace; flex-shrink: 0; }
 .wm-del { color: #666; font-size: calc(var(--u)*0.9); padding: calc(var(--u)*0.15) calc(var(--u)*0.3);
           border-radius: calc(var(--u)*0.23); flex-shrink: 0; line-height: 1; }
 .wm-del:hover { color: #f87171; background: rgba(248,113,113,0.15); }
@@ -89,11 +90,6 @@ body { background: #1a1a2e; color: #eee; font-family: sans-serif; overflow: hidd
 .wm-empty { color: #666; font-size: calc(var(--u)*0.85); padding: calc(var(--u)*0.2) calc(var(--u)*1) calc(var(--u)*0.5); }
 .wm-foot { border-top: 1px solid #444; padding: calc(var(--u)*0.6) calc(var(--u)*1);
            display: flex; flex-direction: column; gap: calc(var(--u)*0.4); }
-#wm-import-btn { background: #3b82f6; color: #fff; border: none;
-                 border-radius: calc(var(--u)*0.4); padding: calc(var(--u)*0.5);
-                 font-size: var(--u); cursor: pointer; }
-#wm-import-btn:hover:not(:disabled) { background: #2563eb; }
-#wm-import-btn:disabled { opacity: 0.5; cursor: wait; }
 #wm-status { font-size: calc(var(--u)*0.85); min-height: calc(var(--u)*1.2); color: #aaa; }
 #wm-status.error { color: #f87171; }
 #wm-status.success { color: #4ade80; }
@@ -208,11 +204,3 @@ body { background: #1a1a2e; color: #eee; font-family: sans-serif; overflow: hidd
 .mh-tip { text-align: center; color: #778; font-size: calc(var(--u)*0.77);
           padding-top: calc(var(--u)*0.3); }
 
-/* Inline overwrite-confirm buttons in the world-modal status row */
-#wm-status .wm-ow { margin-left: calc(var(--u)*0.45); padding: 1px calc(var(--u)*0.7);
-                    border-radius: calc(var(--u)*0.3); border: 1px solid #555;
-                    background: #2a2a4a; color: #eee; font-size: calc(var(--u)*0.75);
-                    cursor: pointer; }
-#wm-status .wm-ow:hover { border-color: #888; }
-#wm-status .wm-ow.danger { background: #7f1d1d; border-color: #b91c1c; }
-#wm-status .wm-ow.danger:hover { background: #991b1b; }

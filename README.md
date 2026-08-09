@@ -32,9 +32,9 @@ An HTTP API for track management and vehicle state queries is served under the `
 | `POST` | `/sim/api/brightness` | Set scene brightness (`{"value": 0.2..2.0}`, 1.0 = default). Applied instantly at the display layer — the 3D viewer and the robot camera frames darken/brighten by the same factor (no world restart). One shared server-side value: every open viewer stays in sync. Persists across world switches and restarts |
 | `GET` | `/sim/api/objects` | World models query (name, `type`: object/wall/light, static, movable, origin/current pose, size) |
 | `POST` | `/sim/api/models/<name>/pose` | Move/rotate a world object (`{"x": 1.0, "y": 2.0, "z": 0.1, "yaw": 0.0}` — omitted fields keep their current value; rotation is yaw-only. Works for World Builder objects and traffic lights; walls and the track itself are rejected) |
-| `GET` | `/sim/api/worlds` | World list (includes the current world) |
+| `GET` | `/sim/api/worlds` | World list (includes the current world). Each item carries `name`, `file`, `display` (the published name for worlds installed from the CDN), `world_id` (32-hex publish id, `null` for built-ins), `official`, and `deletable` |
 | `POST` | `/sim/api/respawn` | Reload the world to reset all objects to their start state |
-| `POST` | `/sim/api/switch` | Switch world (`{"world": "<name>.world"}`) |
+| `POST` | `/sim/api/switch` | Switch world (`{"world": "<name>.world"}` or `{"world_id": "<32-hex id>"}` — the id form resolves an installed published world and returns 404 when it is not installed) |
 | `GET` | `/sim/api/traffic_lights` | List the world's traffic lights and their states |
 | `POST` | `/sim/api/traffic_lights/<name>` | Change a light state (`{"state": "red"}` or `{"state": "green"}` — green→red passes through 3 s of yellow, during which commands are rejected with 409) |
 | `GET` | `/sim/api/overlay` | Current on-screen status text (`{"text": ...}`) |

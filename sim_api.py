@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright 2026 AICASTLE Inc.
 
-import re, os, json, math, subprocess, glob, http.server, threading, time, signal, tarfile, tempfile, shutil, io, logging
+import re, os, json, math, subprocess, glob, http.server, threading, time, signal, tempfile, shutil, logging
 
 logging.basicConfig(
     level=logging.INFO,
@@ -82,27 +82,6 @@ VEHICLE_NAME = VEHICLE["model_name"]
 PROTECTED_NAMES = {"physicar_base", "physicar", "sun", "physicar_sky",
                    "box_obstacle", "physicar_box_obstacle", "physicar_ball", "physicar_cone",
                    VEHICLE_NAME}
-MAX_UPLOAD_SIZE = 50 * 1024 * 1024  # 50MB
-CHUNK_SIZE = 10 * 1024 * 1024  # 10MB chunks for Codespaces proxy limit
-UPLOAD_TIMEOUT = 600  # 10 minutes
-
-# Chunked upload sessions: upload_id -> {path, filename, size, received, last_activity}
-_upload_sessions = {}
-_upload_lock = threading.Lock()
-
-def _cleanup_stale_uploads():
-    """Remove upload sessions older than UPLOAD_TIMEOUT."""
-    now = time.time()
-    with _upload_lock:
-        stale = [uid for uid, s in _upload_sessions.items() if now - s["last_activity"] > UPLOAD_TIMEOUT]
-        for uid in stale:
-            try:
-                os.unlink(_upload_sessions[uid]["path"])
-            except Exception:
-                pass
-            del _upload_sessions[uid]
-            logging.info("cleaned up stale upload: %s", uid)
-
 def _validate_world_name(name):
     """Validate world name: starts with letter, alphanumeric + underscores."""
     return bool(re.match(r'^[A-Za-z][A-Za-z0-9_]{0,63}$', name))
@@ -124,96 +103,6 @@ def _save_last_world(world_file):
             fp.write(os.path.splitext(world_file)[0])
     except Exception as e:
         logging.warning("could not persist last world: %s", e)
-
-def _validate_tar(tar_path):
-    """Validate uploaded tar.gz. Discovers world name from worlds/*.world.
-    Returns (ok, error_message, world_name)."""
-    try:
-        with tarfile.open(tar_path, 'r:gz') as tf:
-            names = tf.getnames()
-            # Security: no absolute paths or path traversal
-            for n in names:
-                if n.startswith('/') or '..' in n:
-                    return False, f"unsafe path: {n}", None
-
-            # Discover world name from worlds/*.world (must be exactly one)
-            world_files = [n for n in names
-                           if n.startswith("worlds/") and n.endswith(".world")
-                           and n.count("/") == 1]
-            if len(world_files) == 0:
-                return False, "no worlds/*.world found in archive", None
-            if len(world_files) > 1:
-                return False, "multiple .world files found", None
-
-            world_file = world_files[0]
-            world_name = os.path.splitext(os.path.basename(world_file))[0]
-
-            if not _validate_world_name(world_name):
-                return False, f"invalid world name: {world_name}", None
-
-            # Required: models/{world_name}/ with model.config and *.sdf
-            model_config = f"models/{world_name}/model.config"
-            has_config = model_config in names
-            has_sdf = any(n.startswith(f"models/{world_name}/")
-                         and n.endswith(".sdf") for n in names)
-
-            # Required: meshes/{world_name}/ with at least one file
-            has_mesh = any(n.startswith(f"meshes/{world_name}/")
-                          and not n.endswith("/") for n in names)
-
-            errors = []
-            if not has_config:
-                errors.append(f"missing {model_config}")
-            if not has_sdf:
-                errors.append(f"missing models/{world_name}/*.sdf")
-            if not has_mesh:
-                errors.append(f"missing meshes/{world_name}/ files")
-            if errors:
-                return False, "; ".join(errors), None
-
-            # Optional: routes/ — if present, must be routes/{world_name}.npy only
-            route_files = [n for n in names
-                           if n.startswith("routes/") and not n.endswith("/")
-                           and n != "routes/"]
-            if route_files:
-                expected = f"routes/{world_name}.npy"
-                bad = [f for f in route_files if f != expected]
-                if bad:
-                    return False, f"route file must be {expected}, got: {bad}", None
-                npy_f = tf.extractfile(expected)
-                if npy_f:
-                    try:
-                        import numpy as np
-                        arr = np.load(io.BytesIO(npy_f.read()))
-                        if arr.ndim != 2 or arr.shape[0] < 2 or arr.shape[1] < 2:
-                            return False, f"route must be 2D array (>=2x2), got {arr.shape}", None
-                    except Exception as e:
-                        return False, f"invalid route npy: {e}", None
-
-            # Optional: track_iconography/ — if present, must be {world_name}.png only
-            icon_files = [n for n in names
-                          if n.startswith("track_iconography/") and not n.endswith("/")
-                          and n != "track_iconography/"]
-            if icon_files:
-                expected = f"track_iconography/{world_name}.png"
-                bad = [f for f in icon_files if f != expected]
-                if bad:
-                    return False, f"icon must be {expected}, got: {bad}", None
-
-            # Validate <world name="..."> matches world_name
-            wf = tf.extractfile(world_file)
-            if wf:
-                wdata = wf.read().decode("utf-8", errors="replace")
-                m = re.search(r'<world\s+name="([^"]+)"', wdata)
-                if not m:
-                    return False, 'world file missing <world name="...">', None
-                if m.group(1) != world_name:
-                    return False, (f'SDF world name "{m.group(1)}" does not match '
-                                   f'file name "{world_name}"'), None
-
-            return True, None, world_name
-    except tarfile.TarError as e:
-        return False, f"invalid tar.gz: {e}", None
 
 SKY_DOME_INCLUDE = """  <include>
     <uri>model://models/physicar_sky</uri>
@@ -256,19 +145,6 @@ def _ensure_sky_dome(world_file):
             logging.info("world defaults ensured for %s", world_file)
     except Exception as e:
         logging.warning("world normalization failed for %s: %s", world_file, e)
-
-def _extract_world(tar_path, world_name):
-    """Extract validated tar.gz into share/ directory."""
-    with tarfile.open(tar_path, 'r:gz') as tf:
-        exact = {f"worlds/{world_name}.world",
-                 f"routes/{world_name}.npy",
-                 f"track_iconography/{world_name}.png"}
-        prefixes = (f"models/{world_name}/", f"meshes/{world_name}/")
-        for member in tf.getmembers():
-            if member.name in exact or any(member.name.startswith(p) for p in prefixes):
-                tf.extract(member, SHARE_DIR)
-    _ensure_sky_dome(f"{world_name}.world")
-    _normalize_textures(world_name)
 
 def _normalize_textures(world_name):
     """Re-encode image files whose bytes don't match their .png extension.
@@ -1438,8 +1314,6 @@ def _watchdog():
     while True:
         time.sleep(5)
         try:
-            _cleanup_stale_uploads()
-
             with _lock:
                 if _switching:
                     elapsed = time.time() - _switching_since
@@ -1526,10 +1400,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 # Only imported worlds (custom_ prefix) are deletable; everything
                 # else ships with the sim and counts as official.
                 pub = _pub_sidecar(name)
+                custom = name.startswith("custom_")
                 items.append({"name": name, "file": os.path.basename(w),
                               "display": (pub or {}).get("name") or name,
                               "world_id": (pub or {}).get("world_id"),
-                              "deletable": name.startswith("custom_") and name not in PROTECTED_NAMES})
+                              "official": not custom,
+                              "deletable": custom and name not in PROTECTED_NAMES})
             # Protected (built-in) worlds first, then alphabetical
             items.sort(key=lambda x: (x["deletable"], x["name"]))
             with _lock:
@@ -1717,6 +1593,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length)) if length else {}
             world_file = body.get("world", "")
+            wid = str(body.get("world_id", ""))
+            if not world_file and re.match(r'^[0-9a-f]{32}$', wid):
+                # world_id 기반 스위치 — 설치된 배포 월드의 사이드카에서 해석
+                for sc in glob.glob(os.path.join(WORLDS_DIR, "*.pcpub.json")):
+                    try:
+                        with open(sc) as f:
+                            if json.load(f).get("world_id") == wid:
+                                world_file = os.path.basename(sc)[:-len(".pcpub.json")] + ".world"
+                                break
+                    except Exception:
+                        pass
+                if not world_file:
+                    self._json(404, {"error": "world not installed"})
+                    return
             if not re.match(r'^[\w]+\.world$', world_file):
                 self._json(400, {"error": "invalid world file name"})
                 return
@@ -1740,186 +1630,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
             except Exception:
                 logging.exception("world install failed: %s", world_id)
                 self._json(502, {"error": "install failed (network or archive error)"})
-        elif self.path.split("?", 1)[0] == "/upload":
-            content_type = self.headers.get("Content-Type", "")
-            content_length = int(self.headers.get("Content-Length", 0))
-            if content_length > MAX_UPLOAD_SIZE:
-                self._json(413, {"error": f"file too large (max {MAX_UPLOAD_SIZE // 1024 // 1024}MB)"})
-                return
-            if "multipart/form-data" not in content_type:
-                self._json(400, {"error": "expected multipart/form-data"})
-                return
-            boundary = None
-            for part in content_type.split(";"):
-                part = part.strip()
-                if part.startswith("boundary="):
-                    boundary = part[9:].strip('"')
-            if not boundary:
-                self._json(400, {"error": "missing boundary"})
-                return
-            raw = self.rfile.read(content_length)
-            boundary_bytes = ("--" + boundary).encode()
-            parts = raw.split(boundary_bytes)
-            file_data = None
-            filename = None
-            for part in parts:
-                if b"Content-Disposition" in part and b"filename=" in part:
-                    header_end = part.find(b"\r\n\r\n")
-                    if header_end < 0:
-                        continue
-                    header = part[:header_end].decode("utf-8", errors="replace")
-                    fm = re.search(r'filename="([^"]+)"', header)
-                    if fm:
-                        filename = fm.group(1)
-                    file_data = part[header_end + 4:]
-                    if file_data.endswith(b"\r\n"):
-                        file_data = file_data[:-2]
-            if not file_data or not filename:
-                self._json(400, {"error": "no file in upload"})
-                return
-            if not filename.endswith(".tar.gz"):
-                self._json(400, {"error": "file must be .tar.gz"})
-                return
-            with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp:
-                tmp.write(file_data)
-                tmp_path = tmp.name
-            try:
-                ok, err, world_name = _validate_tar(tmp_path)
-                if not ok:
-                    self._json(400, {"error": err})
-                    return
-                if world_name in PROTECTED_NAMES:
-                    self._json(403, {"error": f"cannot overwrite protected world: {world_name}"})
-                    return
-                exists = os.path.isfile(os.path.join(WORLDS_DIR, f"{world_name}.world"))
-                overwrite = "overwrite=1" in (self.path.split("?", 1) + [""])[1]
-                if exists and not overwrite:
-                    # Duplicate name: never replace silently. The client asks the
-                    # user and re-uploads with ?overwrite=1.
-                    self._json(409, {"error": "exists", "world": world_name})
-                    return
-                if exists:
-                    _delete_world_files(world_name)
-                _extract_world(tmp_path, world_name)
-                self._json(200, {"ok": True, "world": world_name})
-            finally:
-                os.unlink(tmp_path)
-        elif self.path == "/upload/init":
-            # Chunked upload: initialize session
-            _cleanup_stale_uploads()
-            length = int(self.headers.get("Content-Length", 0))
-            body = json.loads(self.rfile.read(length)) if length else {}
-            filename = body.get("filename", "")
-            total_size = body.get("size", 0)
-            if not filename.endswith(".tar.gz"):
-                self._json(400, {"error": "file must be .tar.gz"})
-                return
-            if total_size > MAX_UPLOAD_SIZE:
-                self._json(413, {"error": f"file too large (max {MAX_UPLOAD_SIZE // 1024 // 1024}MB)"})
-                return
-            import uuid
-            upload_id = str(uuid.uuid4())
-            tmp = tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False)
-            tmp.close()
-            with _upload_lock:
-                _upload_sessions[upload_id] = {
-                    "path": tmp.name,
-                    "filename": filename,
-                    "size": total_size,
-                    "received": 0,
-                    "last_activity": time.time()
-                }
-            logging.info("upload init: %s (%s, %d bytes)", upload_id, filename, total_size)
-            self._json(200, {"ok": True, "upload_id": upload_id, "chunk_size": CHUNK_SIZE})
-        elif self.path == "/upload/chunk":
-            # Chunked upload: receive chunk
-            length = int(self.headers.get("Content-Length", 0))
-            body = json.loads(self.rfile.read(length)) if length else {}
-            upload_id = body.get("upload_id", "")
-            chunk_index = body.get("chunk_index", 0)
-            chunk_data = body.get("data", "")
-            with _upload_lock:
-                session = _upload_sessions.get(upload_id)
-            if not session:
-                self._json(404, {"error": "upload session not found"})
-                return
-            import base64
-            try:
-                data = base64.b64decode(chunk_data)
-            except Exception:
-                self._json(400, {"error": "invalid chunk data"})
-                return
-            with open(session["path"], "r+b" if os.path.exists(session["path"]) else "wb") as f:
-                f.seek(chunk_index * CHUNK_SIZE)
-                f.write(data)
-            with _upload_lock:
-                session["received"] += len(data)
-                session["last_activity"] = time.time()
-            self._json(200, {"ok": True, "received": session["received"]})
-        elif self.path == "/upload/complete":
-            # Chunked upload: finalize and validate
-            length = int(self.headers.get("Content-Length", 0))
-            body = json.loads(self.rfile.read(length)) if length else {}
-            upload_id = body.get("upload_id", "")
-            with _upload_lock:
-                session = _upload_sessions.get(upload_id)
-            if not session:
-                self._json(404, {"error": "upload session not found"})
-                return
-            tmp_path = session["path"]
-            keep_session = False
-            try:
-                ok, err, world_name = _validate_tar(tmp_path)
-                if not ok:
-                    self._json(400, {"error": err})
-                    return
-                if world_name in PROTECTED_NAMES:
-                    self._json(403, {"error": f"cannot overwrite protected world: {world_name}"})
-                    return
-                exists = os.path.isfile(os.path.join(WORLDS_DIR, f"{world_name}.world"))
-                if exists and not body.get("overwrite"):
-                    # Duplicate name: never replace silently. Keep the uploaded
-                    # file so the client can confirm and re-complete with
-                    # {"overwrite": true} (or /upload/cancel) — no re-upload.
-                    keep_session = True
-                    with _upload_lock:
-                        if upload_id in _upload_sessions:
-                            _upload_sessions[upload_id]["last_activity"] = time.time()
-                    self._json(409, {"error": "exists", "world": world_name})
-                    return
-                if exists:
-                    _delete_world_files(world_name)
-                _extract_world(tmp_path, world_name)
-                logging.info("upload complete: %s -> %s", upload_id, world_name)
-                self._json(200, {"ok": True, "world": world_name})
-            except Exception as e:
-                # 예외를 밖으로 흘리면 요청 스레드가 죽어 클라이언트는 원인 없는 502를
-                # 받는다 (실사례: share/ 가 root 소유라 PermissionError → 502).
-                logging.exception("upload complete failed: %s", upload_id)
-                self._json(500, {"error": f"import failed: {type(e).__name__}: {e}"})
-            finally:
-                if not keep_session:
-                    try:
-                        os.unlink(tmp_path)
-                    except Exception:
-                        pass
-                    with _upload_lock:
-                        if upload_id in _upload_sessions:
-                            del _upload_sessions[upload_id]
-        elif self.path == "/upload/cancel":
-            # Chunked upload: cancel and cleanup
-            length = int(self.headers.get("Content-Length", 0))
-            body = json.loads(self.rfile.read(length)) if length else {}
-            upload_id = body.get("upload_id", "")
-            with _upload_lock:
-                session = _upload_sessions.pop(upload_id, None)
-            if session:
-                try:
-                    os.unlink(session["path"])
-                except Exception:
-                    pass
-                logging.info("upload cancelled: %s", upload_id)
-            self._json(200, {"ok": True})
         elif self.path == "/pose":
             # 차량 텔레포트 — 생략된 좌표는 현재 포즈 유지.
             # z=0.05·roll/pitch=0 으로 정규화: 뒤집힌/올라탄 차를 일으켜 세우는 동작 겸용.
@@ -2067,16 +1777,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     logging.info("sim_api starting, killing stale processes")
-    # Cleanup any stale upload temp files from previous runs
-    import glob as _glob
-    for f in _glob.glob(os.path.join(tempfile.gettempdir(), "tmp*.tar.gz")):
-        try:
-            mtime = os.path.getmtime(f)
-            if time.time() - mtime > UPLOAD_TIMEOUT:
-                os.unlink(f)
-                logging.info("cleaned up stale temp file: %s", f)
-        except Exception:
-            pass
     _kill_all_gz()
     # Boot the world immediately instead of waiting for the watchdog's first
     # 5s tick — cuts several seconds off time-to-first-camera-frame.

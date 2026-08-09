@@ -648,7 +648,6 @@ function setControlsEnabled(enabled) {
   _controlsEnabled = enabled;
   var chip = document.getElementById("world-chip");
   if (enabled) { chip.classList.remove("disabled"); } else { chip.classList.add("disabled"); }
-  document.getElementById("wm-import-btn").disabled = !enabled;
 }
 
 function openWorldModal() {
@@ -660,7 +659,6 @@ function openWorldModal() {
 function closeWorldModal() {
   document.getElementById("world-modal-overlay").classList.remove("open");
   document.getElementById("world-modal").classList.remove("open");
-  document.getElementById("file-input").value = "";
   renderWorldLists();   // collapse any pending inline delete confirm
 }
 
@@ -668,48 +666,6 @@ function _wmStatus(msg, cls) {
   var el = document.getElementById("wm-status");
   el.textContent = msg || "";
   el.className = cls || "";
-}
-
-// Inline overwrite confirm (webviews drop native confirm()). The upload
-// session is held server-side: Replace re-completes it with overwrite,
-// Cancel discards it — either way no second upload.
-function _wmOverwriteConfirm(world, uploadId) {
-  var el = document.getElementById("wm-status");
-  el.className = "";
-  el.textContent = "";
-  var span = document.createElement("span");
-  span.textContent = "World \"" + world + "\" already exists. Replace it?";
-  var rep = document.createElement("button");
-  rep.className = "wm-ow danger";
-  rep.textContent = "Replace";
-  var can = document.createElement("button");
-  can.className = "wm-ow";
-  can.textContent = "Cancel";
-  el.appendChild(span); el.appendChild(rep); el.appendChild(can);
-  rep.onclick = function () {
-    _wmStatus("Processing...", "");
-    fetch("/sim/api/upload/complete", {
-      method: "POST",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({upload_id: uploadId, overwrite: true})
-    })
-    .then(function (r) { return r.json(); })
-    .then(function (res) {
-      if (!res.ok) throw new Error(res.error || "Upload failed");
-      _wmStatus("World \"" + res.world + "\" replaced!", "success");
-      loadWorlds(res.world);
-      setTimeout(function () { closeWorldModal(); switchWorld(res.world + ".world"); }, 1500);
-    })
-    .catch(function (e) { _wmStatus("Upload failed: " + e.message, "error"); });
-  };
-  can.onclick = function () {
-    fetch("/sim/api/upload/cancel", {
-      method: "POST",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({upload_id: uploadId})
-    }).catch(function () {});
-    _wmStatus("Import cancelled.", "");
-  };
 }
 
 function renderWorldLists() {
@@ -723,8 +679,15 @@ function renderWorldLists() {
     row.className = "wm-row" + (isCurrent ? " active" : "");
     var label = document.createElement("span");
     label.className = "wm-name";
-    label.textContent = (isCurrent ? "\u2713 " : "") + w.name;
+    label.textContent = (isCurrent ? "\u2713 " : "") + (w.display || w.name);
     row.appendChild(label);
+    if (w.world_id) {
+      var idTag = document.createElement("span");
+      idTag.className = "wm-idtag";
+      idTag.textContent = w.world_id.slice(0, 8);
+      idTag.title = w.world_id;
+      row.appendChild(idTag);
+    }
     row.onclick = function() { if (!isCurrent) switchWorld(w.file); };
     if (w.deletable) {
       var del = document.createElement("span");
@@ -751,12 +714,13 @@ function renderWorldLists() {
       };
       row.appendChild(del);
     }
-    (w.name.indexOf("custom_") === 0 ? custom : official).appendChild(row);
+    var isCustom = w.official !== undefined ? !w.official : w.name.indexOf("custom_") === 0;
+    (isCustom ? custom : official).appendChild(row);
   });
   if (!custom.children.length) {
     var empty = document.createElement("div");
     empty.className = "wm-empty";
-    empty.textContent = "No custom worlds yet — import one below.";
+    empty.textContent = "No custom worlds installed yet.";
     custom.appendChild(empty);
   }
 }
@@ -766,7 +730,12 @@ function loadWorlds(selectWorld) {
   fetch("/sim/api/worlds").then(function(r){return r.json()}).then(function(data) {
     worldsData = data.worlds;
     currentWorld = selectWorld || data.current;
-    document.getElementById("world-chip").textContent = currentWorld || "...";
+    var curRow = null;
+    for (var i = 0; i < worldsData.length; i++) {
+      if (worldsData[i].name === currentWorld) { curRow = worldsData[i]; break; }
+    }
+    document.getElementById("world-chip").textContent =
+      (curRow && (curRow.display || curRow.name)) || currentWorld || "...";
     renderWorldLists();
     setControlsEnabled(true);
   }).catch(function() { setTimeout(function(){ loadWorlds(); }, 3000); });
@@ -792,143 +761,23 @@ function deleteWorld(name) {
     }).catch(function() { _wmStatus("Delete failed", "error"); setControlsEnabled(true); });
 }
 
-// Drag & drop — 모달 없이도 화면 어디에나 .tar.gz를 떨어뜨리면 업로드
-window.addEventListener("load", function() {
-  ["dragenter", "dragover"].forEach(function(e) {
-    window.addEventListener(e, function(ev) { ev.preventDefault(); }, false);
-  });
-  window.addEventListener("drop", function(ev) {
-    ev.preventDefault();
-    var files = ev.dataTransfer && ev.dataTransfer.files;
-    if (files && files.length > 0) handleFile(files[0]);
-  }, false);
-});
-
-function handleFile(file) {
-  if (!file) return;
-  // Reset the picker so cancelling and re-choosing the same file re-fires change
-  var fi = document.getElementById("file-input");
-  if (fi) fi.value = "";
-  openWorldModal(); // progress shows in the modal footer (drag&drop path too)
-  var statusEl = document.getElementById("wm-status");
-  if (!file.name.endsWith(".tar.gz")) {
-    statusEl.textContent = "File must be .tar.gz";
-    statusEl.className = "error";
-    return;
-  }
-  statusEl.textContent = "Uploading " + file.name + "...";
-  statusEl.className = "";
-  
-  // Chunked upload for Codespaces proxy limit (10MB)
-  var CHUNK_SIZE = 10 * 1024 * 1024;
-  var uploadId = null;
-  
-  function cleanup() {
-    if (uploadId) {
-      fetch("/sim/api/upload/cancel", {
-        method: "POST",
-        headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({upload_id: uploadId})
-      }).catch(function() {});
-    }
-  }
-  
-  // Initialize upload
-  fetch("/sim/api/upload/init", {
-    method: "POST",
-    headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({filename: file.name, size: file.size})
-  })
-  .then(function(r) { return r.json(); })
-  .then(function(init) {
-    if (!init.ok) throw new Error(init.error || "Init failed");
-    uploadId = init.upload_id;
-    
-    // Split file into chunks and upload in parallel
-    var totalChunks = Math.ceil(file.size / CHUNK_SIZE);
-    var promises = [];
-    
-    for (var i = 0; i < totalChunks; i++) {
-      (function(chunkIndex) {
-        var start = chunkIndex * CHUNK_SIZE;
-        var end = Math.min(start + CHUNK_SIZE, file.size);
-        var blob = file.slice(start, end);
-        
-        var p = new Promise(function(resolve, reject) {
-          var reader = new FileReader();
-          reader.onload = function() {
-            var base64 = btoa(new Uint8Array(reader.result).reduce(function(data, byte) {
-              return data + String.fromCharCode(byte);
-            }, ''));
-            fetch("/sim/api/upload/chunk", {
-              method: "POST",
-              headers: {"Content-Type": "application/json"},
-              body: JSON.stringify({upload_id: uploadId, chunk_index: chunkIndex, data: base64})
-            })
-            .then(function(r) { return r.json(); })
-            .then(function(d) {
-              if (d.ok) {
-                var pct = Math.round((chunkIndex + 1) / totalChunks * 100);
-                statusEl.textContent = "Uploading " + file.name + "... " + pct + "%";
-                resolve();
-              } else {
-                reject(new Error(d.error || "Chunk upload failed"));
-              }
-            })
-            .catch(reject);
-          };
-          reader.onerror = reject;
-          reader.readAsArrayBuffer(blob);
-        });
-        promises.push(p);
-      })(i);
-    }
-    
-    return Promise.all(promises);
-  })
-  .then(function() {
-    statusEl.textContent = "Processing...";
-    return fetch("/sim/api/upload/complete", {
-      method: "POST",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({upload_id: uploadId})
-    });
-  })
-  .then(function(r) { return r.json(); })
-  .then(function(res) {
-    if (res.ok) {
-      statusEl.textContent = "World \"" + res.world + "\" uploaded!";
-      statusEl.className = "success";
-      var uploadedWorld = res.world;
-      loadWorlds(uploadedWorld);
-      setTimeout(function() { closeWorldModal(); switchWorld(uploadedWorld + ".world"); }, 1500);
-    } else if (res.error === "exists") {
-      // Server kept the upload session — ask before replacing, no re-upload
-      var keptId = uploadId;
-      uploadId = null;   // a later cleanup() must not cancel the kept session
-      _wmOverwriteConfirm(res.world, keptId);
-    } else {
-      throw new Error(res.error || "Upload failed");
-    }
-  })
-  .catch(function(e) {
-    statusEl.textContent = "Upload failed: " + e.message;
-    statusEl.className = "error";
-    cleanup();
-  });
-}
-
 function switchWorld(worldFile) {
   setControlsEnabled(false);
   _prefetchSwitchTarget(worldFile);   // gz 재시작(수 초)과 다운로드를 겹친다
   var targetWorld = worldFile.replace(/\.world$/, "");
-  document.getElementById("world-chip").textContent = targetWorld;
+  var row = null;
+  for (var i = 0; i < (worldsData || []).length; i++) {
+    if (worldsData[i].file === worldFile) { row = worldsData[i]; break; }
+  }
+  document.getElementById("world-chip").textContent =
+    (row && (row.display || row.name)) || targetWorld;
   closeWorldModal();
   document.getElementById("respawn-btn").disabled = true;
   fetch("/sim/api/switch", {
     method: "POST",
     headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({world: worldFile})
+    // 배포 월드는 world_id 로 스위치 (파일명은 내장 월드용)
+    body: JSON.stringify(row && row.world_id ? {world_id: row.world_id} : {world: worldFile})
   }).then(function() {
     var attempts = 0;
     var poll = setInterval(function() {
