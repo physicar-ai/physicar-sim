@@ -681,11 +681,12 @@ function renderWorldLists() {
     label.className = "wm-name";
     label.textContent = (isCurrent ? "\u2713 " : "") + (w.display || w.name);
     row.appendChild(label);
-    if (w.world_id) {
+    var idText = w.world_id ? w.world_id.slice(0, 8) : w.name;
+    if (w.display && w.display !== w.name || w.world_id) {
       var idTag = document.createElement("span");
       idTag.className = "wm-idtag";
-      idTag.textContent = w.world_id.slice(0, 8);
-      idTag.title = w.world_id;
+      idTag.textContent = idText;
+      idTag.title = w.world_id || w.name;
       row.appendChild(idTag);
     }
     row.onclick = function() { if (!isCurrent) switchWorld(w.file); };

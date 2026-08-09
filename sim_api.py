@@ -78,6 +78,9 @@ def _load_vehicle(gen):
 VEHICLE = _load_vehicle(GENERATION)
 VEHICLE_NAME = VEHICLE["model_name"]
 
+# Official world display names — 내부명(id 역할)과 별개의 사람용 이름
+OFFICIAL_WORLD_NAMES = {"physicar_base": "PhysiCar Base"}
+
 # Protected worlds/models that cannot be deleted or overwritten
 PROTECTED_NAMES = {"physicar_base", "physicar", "sun", "physicar_sky",
                    "box_obstacle", "physicar_box_obstacle", "physicar_ball", "physicar_cone",
@@ -1408,7 +1411,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 pub = _pub_sidecar(name)
                 custom = name.startswith("custom_")
                 items.append({"name": name, "file": os.path.basename(w),
-                              "display": (pub or {}).get("name") or name,
+                              "display": (pub or {}).get("name")
+                                         or OFFICIAL_WORLD_NAMES.get(name) or name,
                               "world_id": (pub or {}).get("world_id"),
                               "size": (pub or {}).get("size"),
                               "official": not custom,
