@@ -202,7 +202,11 @@ function connect() {
   gz.on("connection", function() {
     connected = true;
     reconnectDelay = 3000;  // backoff reset on successful connect
-    document.getElementById("respawn-btn").disabled = false;
+    var rb = document.getElementById("respawn-btn");
+    rb.disabled = false;
+    // 리스폰/전환 완료 — 예전엔 페이지 리로드가 busy 스피너를 치웠지만,
+    // 제자리 재접속 방식에서는 여기가 완료 지점이다
+    rb.classList.remove("busy");
     // Sync world list on every (re)connect
     loadWorlds();
     _refreshWorldPub();   // 월드 전환 = WS 재연결 — CDN 매핑도 함께 갱신
@@ -928,7 +932,10 @@ function switchWorld(worldFile) {
         }
       }).catch(function() {});
     }, 1000);
-  }).catch(function() { setControlsEnabled(true); });
+  }).catch(function() {
+    setControlsEnabled(true);
+    document.getElementById("respawn-btn").classList.remove("busy");
+  });
 }
 
 // ── Scene brightness: one server-side factor, applied instantly ──
