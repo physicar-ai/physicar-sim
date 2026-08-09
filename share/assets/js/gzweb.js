@@ -2280,13 +2280,26 @@ var gzScene = GzScene.create({
     return "/sim/meshes/" + p;
   },
   loadMesh: function(url, onLoad, onError) {
+    // 배포 월드 CDN 실패(배포 삭제 등) 대비 — 설치본은 로컬에 있으므로 sim 서버로 폴백
+    var localUrl = (_pubWorld && url.indexOf(_pubWorld.base + 'meshes/') === 0)
+      ? '/sim/meshes/' + url.slice((_pubWorld.base + 'meshes/').length) : null;
     // 다운로드(fetch, 병렬·프리페치 재사용)와 파싱(_enqueueParse, 직렬)을 분리
     (_prefetched[url] || fetch(url)
       .then(function(r) {
         if (!r.ok) { throw new Error('HTTP ' + r.status + ': ' + url); }
         return r.text();
       }))
-      .then(function(text) {
+      .then(function(text) { return { text: text, src: url }; })
+      .catch(function(e) {
+        if (!localUrl) { throw e; }
+        return fetch(localUrl).then(function(r) {
+          if (!r.ok) { throw new Error('HTTP ' + r.status + ': ' + localUrl); }
+          return r.text().then(function(t) { return { text: t, src: localUrl }; });
+        });
+      })
+      .then(function(res) {
+        var text = res.text;
+        var src = res.src;
         // 공용 트랙 텍스처(../world_builder/textures/*)는 월드 rev 업로드에 없다
         // (설치 계약 — sim 내장 공용 디렉토리 참조). CDN DAE 를 파싱할 땐 이 참조를
         // 같은 호스트의 공용 자산 경로(sim-assets, 전 월드 캐시 공유)로 재작성한다.
@@ -2294,7 +2307,7 @@ var gzScene = GzScene.create({
         // 못 쓴다 — ../ 등반 상대경로(worlds/<id>/<rev>/meshes/<track>/ = 5단계)로 붙이고
         // 최종 정규화는 브라우저 fetch 가 한다. sim-assets 미가용 코너에선 재작성하지
         // 않는다 (404 → _dropDeadTextures 가 단색 강등).
-        if (_pubWorld && url.indexOf(_pubWorld.base) === 0 && _simAssets) {
+        if (_pubWorld && src.indexOf(_pubWorld.base) === 0 && _simAssets) {
           var simPath = _simAssets.replace(/^https?:\/\/[^/]+/, '');
           text = text.split('../world_builder/')
             .join('../../../../..' + simPath + 'meshes/world_builder/');
@@ -2307,7 +2320,7 @@ var gzScene = GzScene.create({
           new THREE.ColladaLoader().parse(text, function(collada) {
             _tessellateGiantGround(collada.scene);
             onLoad(collada.scene);
-          }, url);
+          }, src);
         });
       })
       .catch(function(e) { if (onError) { onError(e); } });
