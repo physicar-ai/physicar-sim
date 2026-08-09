@@ -1,0 +1,47 @@
+name: Sim Assets Sync
+
+# 태그 릴리스 시 share/meshes 의 공식 시각 자산을 R2(sim-assets/<태그>/)에 업로드.
+# 뷰어는 /worldpub 의 assets_rev 로 이 경로를 찾아 official 월드·차량 메시/텍스처를
+# worlds.physicar.ai(엣지 캐시)에서 직접 받는다 — EC2 egress 캡 우회.
+# complete.json 이 커밋 포인트: 이게 있어야 뷰어가 CDN 경로를 신뢰한다(없으면 로컬 폴백).
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch: {}   # 백필: Actions 에서 태그 ref 를 골라 실행
+
+jobs:
+  sync:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve tag
+        id: tag
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          if ! echo "$TAG" | grep -qE '^v[0-9]'; then
+            echo "::error::not a version tag ref: $TAG (태그에서 실행하세요)"; exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Upload share/meshes to R2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          AWS_EC2_METADATA_DISABLED: 'true'
+          R2_ENDPOINT: https://${{ secrets.CLOUDFLARE_ACCOUNT_ID }}.r2.cloudflarestorage.com
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          DEST="s3://physicar-worlds/sim-assets/${TAG}"
+          # custom_* 는 유저 월드(별도 배포 경로) — 공식 자산만 올린다.
+          # 태그 경로는 불변이라 캐시 퍼지가 필요 없다.
+          aws s3 sync share/meshes "${DEST}/meshes" --endpoint-url "$R2_ENDPOINT" \
+            --exclude "custom_*" --exclude "custom_*/*" --no-progress
+          echo "{\"tag\":\"${TAG}\",\"uploadedAt\":$(date -u +%s)}" > /tmp/complete.json
+          aws s3 cp /tmp/complete.json "${DEST}/complete.json" --endpoint-url "$R2_ENDPOINT" \
+            --content-type application/json --no-progress
+          echo "synced ${DEST}"

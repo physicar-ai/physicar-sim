@@ -2294,15 +2294,26 @@ function _tessellateGiantGround(root) {
 // 로컬(/sim/meshes) 폴백이라 항상 안전하다. DAE 내부 텍스처는 상대경로라 함께 CF 로 간다.
 THREE.ImageLoader.prototype.crossOrigin = 'anonymous';
 THREE.TextureLoader.prototype.crossOrigin = 'anonymous';
-var _pubWorld = null;   // { world, base } — 현재 월드가 배포본일 때만
+var _pubWorld = null;    // { world, base } — 현재 월드가 배포본일 때만
+var _simAssets = null;   // 공식 자산 CDN base — complete.json 확인 후에만
+var _simAssetsTag = null;
 function _refreshWorldPub() {
   fetch('/sim/api/worldpub').then(function(r) { return r.json(); })
     .then(function(d) {
+      var cdn = (d && d.cdn) || 'https://worlds.physicar.ai';
       _pubWorld = (d && d.world && d.world_id && d.rev)
-        ? { world: d.world,
-            base: (d.cdn || 'https://worlds.physicar.ai') + '/worlds/' + d.world_id + '/' + d.rev + '/' }
+        ? { world: d.world, base: cdn + '/worlds/' + d.world_id + '/' + d.rev + '/' }
         : null;
-    }).catch(function() { _pubWorld = null; });
+      var tag = d && d.assets_rev;
+      if (!tag) { _simAssets = null; _simAssetsTag = null; return; }
+      if (tag === _simAssetsTag) { return; }
+      _simAssetsTag = tag;
+      var base = cdn + '/sim-assets/' + tag + '/';
+      // 커밋 포인트 확인 — 이 태그가 R2 에 실제 업로드됐을 때만 CDN 사용 (아니면 로컬)
+      fetch(base + 'complete.json')
+        .then(function(r) { _simAssets = r.ok ? base : null; })
+        .catch(function() { _simAssets = null; });
+    }).catch(function() { _pubWorld = null; _simAssets = null; _simAssetsTag = null; });
 }
 _refreshWorldPub();
 
@@ -2318,6 +2329,9 @@ var gzScene = GzScene.create({
     if (!p) { return null; }
     if (_pubWorld && p.indexOf(_pubWorld.world + '/') === 0) {
       return _pubWorld.base + 'meshes/' + p;
+    }
+    if (_simAssets && p.indexOf('custom_') !== 0) {
+      return _simAssets + 'meshes/' + p;   // official 월드·차량·빌트인 모델
     }
     return "/sim/meshes/" + p;
   },

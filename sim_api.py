@@ -11,6 +11,22 @@ logging.basicConfig(
 
 SIM_DIR = os.path.dirname(os.path.abspath(__file__))
 SHARE_DIR = os.path.join(SIM_DIR, "share")
+
+def _detect_assets_rev():
+    """공식 자산 CDN 리비전 = 정확히 태그 위의 클린 체크아웃일 때 그 태그.
+    dev/더티 트리는 None → 뷰어가 로컬(/sim/meshes) 서빙으로 폴백."""
+    try:
+        out = subprocess.run(["git", "-C", SIM_DIR, "describe", "--tags",
+                              "--exact-match", "--dirty=-dirty"],
+                             capture_output=True, text=True, timeout=5)
+        tag = out.stdout.strip()
+        if out.returncode == 0 and re.match(r'^v[0-9][\w.\-]*$', tag) and not tag.endswith("-dirty"):
+            return tag
+    except Exception:
+        pass
+    return None
+
+ASSETS_REV = _detect_assets_rev()
 WORLDS_DIR = os.path.join(SHARE_DIR, "worlds")
 DEFAULT_WORLD = "physicar_base.world"
 # Last successfully started world, persisted across restarts/reboots
@@ -1481,6 +1497,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._json(200, {"world": world,
                              "world_id": (pub or {}).get("world_id"),
                              "rev": (pub or {}).get("rev"),
+                             "assets_rev": ASSETS_REV,
                              "cdn": WORLDS_CDN})
         elif self.path == "/worlds":
             worlds = sorted(glob.glob(os.path.join(WORLDS_DIR, "*.world")))
