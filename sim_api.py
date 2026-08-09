@@ -1531,6 +1531,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
             try:
                 while True:
                     with _lock:
+                        lights = []
+                        now_t = time.time()
+                        for n, s in sorted(_lights.items()):
+                            ld = {"name": n, **s}
+                            u = ld.pop("yellow_until", None)
+                            if u is not None:
+                                # 잔여초(0.1s 단위) — 노랑 경유 중엔 매 틱 값이
+                                # 달라져 스냅샷이 계속 푸시된다 (클라 타이밍 유지)
+                                ld["yellow_left"] = round(max(0.0, u - now_t), 1)
+                            lights.append(ld)
                         snap = {
                             "running": _sim_proc is not None and _sim_proc.poll() is None,
                             "websocket": _launch_proc is not None and _launch_proc.poll() is None,
@@ -1539,6 +1549,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                             # 뷰어가 폴링하지 않도록 여기서 푸시 (변경 시에만 전송됨)
                             "overlay": _overlay_text if time.monotonic() < _overlay_expiry else "",
                             "brightness": _brightness,
+                            # 신호등 상태 — 마지막 남은 클라 폴링(/traffic_lights 주기
+                            # 조회)을 없애기 위해 스냅샷에 포함 (변경 시에만 전송)
+                            "lights": lights,
                         }
                     if snap != last:
                         self.wfile.write(f"data: {json.dumps(snap)}\n\n".encode())

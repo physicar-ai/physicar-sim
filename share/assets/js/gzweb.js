@@ -99,6 +99,7 @@ function _applyOverlayText(text) {
     try { d = JSON.parse(ev.data); } catch (e) { return; }
     if (typeof d.overlay === 'string') { _applyOverlayText(d.overlay); }
     if (typeof d.brightness === 'number') { _applyRemoteBrightness(d.brightness); }
+    if (Array.isArray(d.lights)) { _applyLightsSnapshot(d.lights); }
   };
 })();
 
@@ -205,7 +206,7 @@ function connect() {
     // Sync world list on every (re)connect
     loadWorlds();
     _refreshWorldPub();   // 월드 전환 = WS 재연결 — CDN 매핑도 함께 갱신
-    _refreshLights(_scheduleLightPoll);
+    _refreshLights();
     _loadGridBounds();
   });
   
@@ -896,6 +897,7 @@ function handleFile(file) {
 
 function switchWorld(worldFile) {
   setControlsEnabled(false);
+  _prefetchSwitchTarget(worldFile);   // gz 재시작(수 초)과 다운로드를 겹친다
   var targetWorld = worldFile.replace(/\.world$/, "");
   document.getElementById("world-chip").textContent = targetWorld;
   closeWorldModal();
@@ -909,12 +911,20 @@ function switchWorld(worldFile) {
     var poll = setInterval(function() {
       attempts++;
       fetch("/sim/api/status").then(function(r){return r.json()}).then(function(d) {
-        if (d.running && d.current === targetWorld) {
-          clearInterval(poll);
-          setTimeout(function() { location.reload(); }, 2000);
+        if (d.running && d.websocket && d.current === targetWorld) {
+          // 페이지 리로드 없이 제자리 재접속 — 예전의 "2초 대기 + 풀 리로드"는
+          // 부트스트랩을 전부 다시 밟느라 전환이 카메라보다 수 초 늦었고,
+          // switch 시점 프리페치(메모리)도 페이지와 함께 사라졌다. 씬은 ws
+          // 재연결로 새로 그려진다 (connection 핸들러가 월드 목록·CDN 매핑
+          // 갱신). 재시작 직후 소켓은 간혹 행에 걸리므로, 접속이 붙을 때까지
+          // 매 틱 재시도한다 (백오프 수십 초에 맡기지 않는다).
+          if (connected) { clearInterval(poll); return; }
+          if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+          reconnectDelay = 500;
+          connect();
         } else if (attempts > 60) {
           clearInterval(poll);
-          location.reload();
+          location.reload();   // 최후 수단 — 전환이 완전히 꼬였을 때만
         }
       }).catch(function() {});
     }, 1000);
@@ -1031,6 +1041,26 @@ function _applyPoseLerp() {
 }
 var _selLight = null;
 
+// SSE 스냅샷의 신호등 상태 반영 — 주기 폴링(/traffic_lights) 대체. 상태가
+// 바뀔 때만 서버가 푸시한다. 노랑 경유 중에는 서버가 준 잔여시간에 맞춰
+// 전환 직후 1회만 정밀 확인한다 (루프 아님 — SSE 틱(1s)보다 빨리 맞추는 용도).
+var _yellowFlipTimer = null;
+function _applyLightsSnapshot(list) {
+  _lightsCache = {};
+  list.forEach(function(l) { _lightsCache[l.name] = l; });
+  _applyLightVisuals();
+  if (_selLight) { _renderLightPanel(); }
+  if (_yellowFlipTimer) { clearTimeout(_yellowFlipTimer); _yellowFlipTimer = null; }
+  var wait = null;
+  list.forEach(function(l) {
+    if (l.state === 'yellow' && typeof l.yellow_left === 'number') {
+      var w = Math.max(150, l.yellow_left * 1000 + 150);
+      wait = (wait === null) ? w : Math.min(wait, w);
+    }
+  });
+  if (wait !== null) { _yellowFlipTimer = setTimeout(function() { _refreshLights(); }, wait); }
+}
+
 function _refreshLights(cb) {
   fetch("/sim/api/traffic_lights")
     .then(function(r) { return r.json(); })
@@ -1104,28 +1134,6 @@ function _placeLightOverlays(name, l) {
   });
 }
 
-// 외부(로봇 코드/API) 상태 변경 반영용 저주파 폴링 — 노랑 경유 중엔 촘촘히.
-// 신호등 없는 월드에서는 5초마다 존재 확인만 한다.
-var _lightPollTimer = null;
-function _scheduleLightPoll() {
-  if (_lightPollTimer) { clearTimeout(_lightPollTimer); }
-  var names = Object.keys(_lightsCache);
-  var delay = 5000;
-  if (connected && names.length > 0) {
-    delay = 2500;
-    names.forEach(function(n) {
-      var l = _lightsCache[n];
-      if (l.state !== 'yellow') { return; }
-      // The server reports the seconds left in the yellow phase — poll right
-      // after that deadline so panel/lamp colors flip in step with the 3D
-      // overlays (which the server moves the instant yellow ends).
-      var wait = (typeof l.yellow_left === 'number')
-        ? Math.max(150, l.yellow_left * 1000 + 150) : 700;
-      delay = Math.min(delay, wait);
-    });
-  }
-  _lightPollTimer = setTimeout(function() { _refreshLights(_scheduleLightPoll); }, delay);
-}
 
 // 픽킹 대상 판별 — 최상위 모델의 link(자식) 이름 마커로 종류 결정
 // (Custom World Builder 계약: object/wall/light — 'signal'은 구 마커)
@@ -1206,7 +1214,7 @@ function _commitPose(sel, pose) {
       _showToast(d.error || "Move failed");
     } else if (sel.kind === 'light') {
       // 오버레이 디스크를 서버 확정 포즈로 즉시 재배치 (폴링까지 안 기다림)
-      _refreshLights(_scheduleLightPoll);
+      _refreshLights();
     }
   })
   .catch(function() { release(); _showToast("Move failed"); });
@@ -1229,7 +1237,7 @@ function _showLightPanel(name) {
   _selLight = name;
   _renderLightPanel();
   document.getElementById("light-panel").classList.add("show");
-  _refreshLights(_scheduleLightPoll);
+  _refreshLights();
 }
 
 function _hideLightPanel() {
@@ -1256,7 +1264,7 @@ function setLightState(name, state) {
   .then(function(r) { return r.json(); })
   .then(function(d) {
     if (!d.ok) { _showToast(d.error || "State change failed"); }
-    _refreshLights(_scheduleLightPoll);
+    _refreshLights();
   })
   .catch(function() { _showToast("State change failed"); });
 }
@@ -2304,10 +2312,12 @@ THREE.TextureLoader.prototype.crossOrigin = 'anonymous';
 var _pubWorld = null;    // { world, base } — 현재 월드가 배포본일 때만
 var _simAssets = null;   // 공식 자산 CDN base — complete.json 확인 후에만
 var _simAssetsTag = null;
+var _cdnBase = 'https://worlds.physicar.ai';   // 전환 프리페치가 meta.json 조회에 사용
 function _refreshWorldPub() {
   fetch('/sim/api/worldpub').then(function(r) { return r.json(); })
     .then(function(d) {
       var cdn = (d && d.cdn) || 'https://worlds.physicar.ai';
+      _cdnBase = cdn;
       _pubWorld = (d && d.world && d.world_id && d.rev)
         ? { world: d.world, base: cdn + '/worlds/' + d.world_id + '/' + d.rev + '/' }
         : null;
@@ -2329,6 +2339,58 @@ function _meshPath(uri) {
   return mi >= 0 ? uri.substring(mi + 7) : uri.split('/').pop();
 }
 
+// ── dae 파싱 큐 ────────────────────────────────────────────────────────────
+// ColladaLoader 는 다운로드 완료 콜백 안에서 "동기" 파싱을 한다 — 월드 전환
+// 직후 수십 개 dae 가 거의 동시에 도착하면 파싱이 연달아 실행되는 동안 메인
+// 스레드가 얼어 아무것도 렌더되지 않는다. 파싱을 한 파일씩, 사이사이 한
+// 프레임을 양보하며 돌리면 모델이 도착한 순서대로 하나씩 화면에 나타난다.
+var _parseQ = [];
+var _parsePumping = false;
+function _pumpParse() {
+  var job = _parseQ.shift();
+  if (!job) { _parsePumping = false; return; }
+  try { job(); } catch (e) { console.error('mesh parse failed:', e); }
+  requestAnimationFrame(function() { setTimeout(_pumpParse, 0); });
+}
+function _enqueueParse(job) {
+  _parseQ.push(job);
+  if (!_parsePumping) { _parsePumping = true; setTimeout(_pumpParse, 0); }
+}
+
+// ── 전환 대상 월드 선(先)다운로드 ──────────────────────────────────────────
+// switch 는 gz 재시작(수 초)을 동반한다 — 그 죽은 시간에 대상 월드의 dae 를
+// 미리 받아 "메모리"에 들고 있으면, 씬이 도착했을 때 지오메트리가 즉시 뜬다
+// (카메라와 거의 동시). 텍스처는 원래대로 늦게 입혀진다. 파일 목록은 배포
+// 매니페스트(meta.json) — 배포본이 아닌 월드(공식/레거시 tar)는 스킵.
+var _prefetched = {};   // URL -> Promise<string(dae text)>
+function _prefetchSwitchTarget(worldFile) {
+  _prefetched = {};   // 한 번에 한 월드만 보관
+  try {
+    var row = null;
+    for (var i = 0; i < (worldsData || []).length; i++) {
+      if (worldsData[i].file === worldFile) { row = worldsData[i]; break; }
+    }
+    if (!row || !row.world_id) { return; }
+    fetch(_cdnBase + '/worlds/' + row.world_id + '/meta.json')
+      .then(function(r) { return r.json(); })
+      .then(function(meta) {
+        if (!meta || !meta.rev || !meta.files) { return; }
+        var base = _cdnBase + '/worlds/' + row.world_id + '/' + meta.rev + '/';
+        meta.files.forEach(function(p) {
+          if (typeof p !== 'string' || p.indexOf('meshes/') !== 0) { return; }
+          if (!/\.dae$/i.test(p)) { return; }   // 지오메트리만 — 텍스처는 늦어도 됨
+          var url = base + p;
+          _prefetched[url] = fetch(url).then(function(r) {
+            if (!r.ok) { throw new Error('HTTP ' + r.status); }
+            return r.text();
+          });
+          _prefetched[url].catch(function() { delete _prefetched[url]; });
+        });
+      })
+      .catch(function() {});
+  } catch (e) { /* prefetch is best-effort */ }
+}
+
 var gzScene = GzScene.create({
   THREE: THREE,
   meshUrl: function(uri) {
@@ -2343,16 +2405,25 @@ var gzScene = GzScene.create({
     return "/sim/meshes/" + p;
   },
   loadMesh: function(url, onLoad, onError) {
-    // FRESH loader per file — THREE's ColladaLoader is not reentrant (parse
-    // state lives on the instance, and world-builder daes reuse library IDs
-    // like "Field"/"StartLine"). With a shared instance, overlapping loads
-    // (world switch while the old world's meshes still stream in) graft one
-    // world's geometry into the other's models.
-    new THREE.ColladaLoader().load(url,
-      function(collada) {
-        _tessellateGiantGround(collada.scene);
-        onLoad(collada.scene);
-      }, null, onError);
+    // 다운로드(fetch, 병렬·프리페치 재사용)와 파싱(_enqueueParse, 직렬)을 분리
+    (_prefetched[url] || fetch(url)
+      .then(function(r) {
+        if (!r.ok) { throw new Error('HTTP ' + r.status + ': ' + url); }
+        return r.text();
+      }))
+      .then(function(text) {
+        _enqueueParse(function() {
+          // FRESH loader per file — THREE's ColladaLoader is not reentrant
+          // (parse state lives on the instance, and world-builder daes reuse
+          // library IDs like "Field"/"StartLine"). With a shared instance,
+          // overlapping loads graft one world's geometry into the other's.
+          new THREE.ColladaLoader().parse(text, function(collada) {
+            _tessellateGiantGround(collada.scene);
+            onLoad(collada.scene);
+          }, url);
+        });
+      })
+      .catch(function(e) { if (onError) { onError(e); } });
   },
   isPhysicarMesh: function(uri) {
     var p = _meshPath(uri);

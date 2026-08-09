@@ -23,7 +23,9 @@ An HTTP API for track management and vehicle state queries is served under the `
 | `GET` | `/sim/api/pose` | Vehicle pose (world absolute coordinates) |
 | `POST` | `/sim/api/pose` | Teleport the vehicle (`{"x": 1.0, "y": 2.0, "yaw": 0.0}` — omitted fields keep their current value; the pose is normalized upright at ground level, so this also rights a flipped car) |
 | `GET` | `/sim/api/clock` | Sim time / real time / RTF / paused |
-| `GET` | `/sim/api/events` | SSE stream of status snapshots (pushed on change — no polling needed) |
+| `GET` | `/sim/api/events` | SSE stream of state snapshots, pushed on change (no polling): sim status, on-screen overlay text, brightness, and traffic light states (each light includes `yellow_left` seconds while a yellow transition is in progress) |
+| `GET` | `/sim/api/worldpub` | Current world's publish coordinates (`world_id`/`rev` when it is an installed published world) plus the official-asset CDN revision (`assets_rev`, set only on a clean tagged checkout) and the CDN base URL — the viewer uses this to load meshes/textures from the worlds CDN |
+| `POST` | `/sim/api/worlds/install` | Install a published world from the worlds CDN (`{"world_id": "<32-hex id>"}`). The server downloads the world's manifest and files directly from the CDN (no browser relay), installs it under the `custom_` convention, and skips the download when the same `rev` is already installed (`"cached": true`) |
 | `GET` | `/sim/api/route` | Track centerline waypoints, plus inner/outer boundary lines when available |
 | `GET` | `/sim/api/bounds` | Track bounds (bounding box) |
 | `GET` | `/sim/api/brightness` | Scene brightness factor (`{"value": 1.0}`) |
