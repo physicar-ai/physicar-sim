@@ -1472,6 +1472,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._json(200, VEHICLE)
         elif self.path == "/brightness":
             self._json(200, {"value": _brightness})
+        elif self.path == "/worldpub":
+            # 현재 월드의 배포 좌표 — 뷰어가 커스텀 월드 시각 파일을 CF(worlds.physicar.ai)
+            # 에서 직접 받게 한다 (EC2 10Mbps egress 캡 우회, 엣지 캐시 공유)
+            with _lock:
+                world = _current_world
+            pub = _pub_sidecar(world) if world else None
+            self._json(200, {"world": world,
+                             "world_id": (pub or {}).get("world_id"),
+                             "rev": (pub or {}).get("rev"),
+                             "cdn": WORLDS_CDN})
         elif self.path == "/worlds":
             worlds = sorted(glob.glob(os.path.join(WORLDS_DIR, "*.world")))
             items = []

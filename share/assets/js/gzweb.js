@@ -193,6 +193,7 @@ function connect() {
     document.getElementById("respawn-btn").disabled = false;
     // Sync world list on every (re)connect
     loadWorlds();
+    _refreshWorldPub();   // 월드 전환 = WS 재연결 — CDN 매핑도 함께 갱신
     _refreshLights(_scheduleLightPoll);
     _loadGridBounds();
   });
@@ -2288,6 +2289,23 @@ function _tessellateGiantGround(root) {
   });
 }
 
+// ── Published-world CDN — 배포 월드의 메시/텍스처는 worlds.physicar.ai 에서 직접 ──
+// (EC2 egress 캡 우회 + 반 전체 엣지 캐시 공유). worldpub 미도착/불일치 시엔
+// 로컬(/sim/meshes) 폴백이라 항상 안전하다. DAE 내부 텍스처는 상대경로라 함께 CF 로 간다.
+THREE.ImageLoader.prototype.crossOrigin = 'anonymous';
+THREE.TextureLoader.prototype.crossOrigin = 'anonymous';
+var _pubWorld = null;   // { world, base } — 현재 월드가 배포본일 때만
+function _refreshWorldPub() {
+  fetch('/sim/api/worldpub').then(function(r) { return r.json(); })
+    .then(function(d) {
+      _pubWorld = (d && d.world && d.world_id && d.rev)
+        ? { world: d.world,
+            base: (d.cdn || 'https://worlds.physicar.ai') + '/worlds/' + d.world_id + '/' + d.rev + '/' }
+        : null;
+    }).catch(function() { _pubWorld = null; });
+}
+_refreshWorldPub();
+
 function _meshPath(uri) {
   var mi = uri.indexOf('meshes/');
   return mi >= 0 ? uri.substring(mi + 7) : uri.split('/').pop();
@@ -2297,7 +2315,11 @@ var gzScene = GzScene.create({
   THREE: THREE,
   meshUrl: function(uri) {
     var p = _meshPath(uri);
-    return p ? "/sim/meshes/" + p : null;
+    if (!p) { return null; }
+    if (_pubWorld && p.indexOf(_pubWorld.world + '/') === 0) {
+      return _pubWorld.base + 'meshes/' + p;
+    }
+    return "/sim/meshes/" + p;
   },
   loadMesh: function(url, onLoad, onError) {
     // FRESH loader per file — THREE's ColladaLoader is not reentrant (parse
