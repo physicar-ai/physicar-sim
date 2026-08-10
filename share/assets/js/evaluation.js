@@ -20,6 +20,10 @@
   var availWorld = null;   // evalDoc 을 조회한 월드
   var simRunning = false;
   var run = null;          // 진행 중 평가 세션 (null = 없음)
+  var robot = null;        // 이 sim 의 로봇 세대 — config.robot 불일치면 ▶ 자체를 숨김
+  fetch(API + '/vehicle').then(function (r) { return r.ok ? r.json() : {}; })
+    .then(function (d) { robot = (d && d.generation) || 'physicar'; updateBtn(); })
+    .catch(function () { robot = 'physicar'; updateBtn(); });
 
   // ── SSE (자체 연결) — 신호등·run 이벤트·월드 전환 감지 ──
   var lights = {};         // name -> 'red'|'green'|'yellow'
@@ -44,6 +48,26 @@
     if (d.phase === 'exit') { runProc = { running: false, exit_code: d.exit_code }; }
     if (d.phase === 'log' && run) { pushLog(d.stream, d.line); }
   });
+
+  // ── 오디오 관측 — 뷰어(gzweb)가 이미 /audio/events 를 구독·재생하며 상태를
+  // _audioChannels(id→채널)에 유지한다. 중복 구독 대신 그 상태를 읽는다 —
+  // 이벤트 장부가 아니라 "실제로 소리가 나는 중인가"가 기준이 된다.
+  function audioPlaying() {
+    var out = [], ch = window._audioChannels || {};
+    for (var k in ch) {
+      if (!ch.hasOwnProperty(k)) { continue; }
+      var e = ch[k];
+      var active = e.media
+        ? (!e.media.paused && !e.media.ended)
+        : ((e.sources && e.sources.length > 0) || (e.queue && e.queue.length > 0));
+      if (!active) { continue; }
+      // 파일 재생은 url 로 "무엇을" 재생 중인지 식별 가능, TTS/실시간은 pcm
+      var item = { id: k, kind: e.media ? 'file' : 'pcm' };
+      if (e.media && e.media.src) { item.url = e.media.src; }
+      out.push(item);
+    }
+    return out;
+  }
 
   function refreshAvail(world) {
     availWorld = world;
@@ -93,8 +117,11 @@
   mountBtn();
 
   function updateBtn() {
-    btn.style.display = evalDoc ? '' : 'none';
-    btn.disabled = !evalDoc || !simRunning || !!run;
+    // 평가가 있고, 이 sim 의 로봇 세대와 맞을 때만 노출 (불일치 = 버튼 자체 없음)
+    var cfgRobot = evalDoc && evalDoc.config && evalDoc.config.robot;
+    var ok = !!evalDoc && (!cfgRobot || robot === null || cfgRobot === robot);
+    btn.style.display = ok ? '' : 'none';
+    btn.disabled = !ok || !simRunning || !!run;
   }
 
   var card = null;
@@ -154,6 +181,7 @@
     var head = outcome === 'finished' ? '✓ Finished'
       : outcome === 'timeout' ? '✕ Time limit exceeded (disqualified)'
       : outcome === 'stopped' ? 'Stopped'
+      : outcome === 'unsupported' ? '✕ Robot not supported'
       : '⚠ Script error';
     card.innerHTML = '<h4></h4><div class="ec-desc"></div>'
       + '<div class="eh-value" style="font:700 22px monospace"></div>'
@@ -168,57 +196,28 @@
 
   // ── Worker 하네스 — 교사 스크립트 앞에 붙는 샌드박스·sim 구현 ──
   // 폐쇄성: 밖으로 나가는 전역 제거. 관측은 obs 메시지로만, 개입은 action 으로만.
+  // ── Worker 하네스 — 샌드박스 + 공리만. 정리(offTrack 등)는 스크립트가 자체 구현 ──
+  // 관측: sim.state / sim.config / sim.track / sim.origins
+  // 개입: teleport / moveObject / setLight / overlay   판정: result / finish
   var HARNESS = [
     'self.fetch=undefined;self.XMLHttpRequest=undefined;self.importScripts=undefined;',
     'self.WebSocket=undefined;self.EventSource=undefined;',
-    'var __route=null,__origins={},__prev=null,__cur=null;',
     'function __post(m){self.postMessage(m);}',
-    'function __nearest(x,y){var w=__route.waypoints,bi=0,bd=1e9;',
-    ' for(var i=0;i<w.length-1;i++){var dx=w[i][0]-x,dy=w[i][1]-y,d=dx*dx+dy*dy;',
-    '  if(d<bd){bd=d;bi=i;}}return bi;}',
-    'function __segX(p1,p2,a,b){',  // 선분 p1→p2 와 a→b 교차 t (없으면 -1)
-    ' var d=(p2.x-p1.x)*(b[1]-a[1])-(p2.y-p1.y)*(b[0]-a[0]);',
-    ' if(Math.abs(d)<1e-12)return -1;',
-    ' var t=((a[0]-p1.x)*(b[1]-a[1])-(a[1]-p1.y)*(b[0]-a[0]))/d;',
-    ' var u=((a[0]-p1.x)*(p2.y-p1.y)-(a[1]-p1.y)*(p2.x-p1.x))/d;',
-    ' return (t>=0&&t<=1&&u>=0&&u<=1)?t:-1;}',
-    'var sim={state:{time:null,pose:null,objects:{},lights:{},run:{}},config:{},',
+    'var sim={state:{time:null,pose:null,objects:{},lights:{},run:{},audio:{playing:[]}},',
+    ' config:{},track:null,origins:{},',
     ' result:function(v){__post({t:"result",value:+v});},',
     ' finish:function(v){__post({t:"finish",value:(v===undefined?undefined:+v)});},',
     ' teleport:function(p){__post({t:"action",name:"teleport",args:p});},',
     ' moveObject:function(n,p){__post({t:"action",name:"moveObject",args:{name:n,pose:p||{}}});},',
     ' setLight:function(n,s){__post({t:"action",name:"setLight",args:{name:n,state:s}});},',
-    ' overlay:function(tx){__post({t:"action",name:"overlay",args:{text:String(tx).slice(0,300)}});},',
-    ' resetObject:function(n){var o=__origins[n];if(o){sim.moveObject(n,{x:o.x,y:o.y,yaw:o.yaw});}},',
-    ' resetObjects:function(){for(var n in __origins){sim.resetObject(n);}},',
-    ' crossedLine:function(which){',   // 'start'|'finish' — 출발선(=route 0번 inner/outer).
-    // 순수 관측: "이번 틱의 이동이 선을 지났는가". 같은 틱에 start·finish 를 모두
-    // 검사하면 둘 다 true 이므로, 스크립트는 else-if 로 순서를 표현한다 (템플릿 참조).
-    '  if(!__route||!__route.inner||!__prev||!__cur)return false;',
-    '  return __segX(__prev,__cur,__route.inner[0],__route.outer[0])>=0;},',
-    ' distanceToCenter:function(){if(!__cur||!__route)return null;',
-    '  var i=__nearest(__cur.x,__cur.y),w=__route.waypoints[i];',
-    '  return Math.hypot(__cur.x-w[0],__cur.y-w[1]);},',
-    ' offTrack:function(){if(!__cur||!__route||!__route.inner)return false;',
-    '  var i=__nearest(__cur.x,__cur.y);',
-    '  var hw=Math.hypot(__route.inner[i][0]-__route.outer[i][0],',
-    '                    __route.inner[i][1]-__route.outer[i][1])/2;',
-    '  return sim.distanceToCenter()>hw;},',
-    ' progress:function(){if(!__cur||!__route)return 0;',
-    '  return __nearest(__cur.x,__cur.y)/(__route.waypoints.length-1);},',
-    ' moveToCenter:function(){if(!__cur||!__route)return;',
-    '  var i=__nearest(__cur.x,__cur.y),w=__route.waypoints,p=w[i],q=w[(i+1)%w.length];',
-    '  sim.teleport({x:p[0],y:p[1],yaw:Math.atan2(q[1]-p[1],q[0]-p[0])});}',
+    ' overlay:function(tx){__post({t:"action",name:"overlay",args:{text:String(tx).slice(0,300)}});}',
     '};',
     'self.onmessage=function(e){var m=e.data;try{',
-    ' if(m.t==="boot"){__route=m.route;__origins=m.origins;sim.config=m.config;__post({t:"ack"});}',
+    ' if(m.t==="boot"){sim.config=m.config;sim.track=m.route;sim.origins=m.origins;__post({t:"ack"});}',
     ' else if(m.t==="initialize"){',
     '  if(typeof initialize==="function"){initialize(sim);}',
     '  __post({t:"phase",phase:"initialized"});}',
-    ' else if(m.t==="obs"){',
-    '  var o=m.o;sim.state=o;',
-    '  if(o.pose){__prev=__cur;__cur={x:o.pose.x,y:o.pose.y};}',
-    '  evaluate(sim);__post({t:"ack"});}',
+    ' else if(m.t==="obs"){sim.state=m.o;evaluate(sim);__post({t:"ack"});}',
     '}catch(err){__post({t:"error",message:String(err&&err.message||err)});}};',
     ''
   ].join('\n');
@@ -236,10 +235,22 @@
     hudSub((cfg.description || '') + ' — initializing');
     updateBtn();
 
-    fetch(API + '/world').then(function (r) {
-      if (!r.ok) { throw new Error('world info unavailable'); }
-      return r.json();
-    }).then(function (wd) {
+    Promise.all([
+      fetch(API + '/world').then(function (r) {
+        if (!r.ok) { throw new Error('world info unavailable'); }
+        return r.json();
+      }),
+      fetch(API + '/vehicle').then(function (r) { return r.ok ? r.json() : {}; })
+    ]).then(function (res) {
+      var wd = res[0];
+      // 로봇 정체성 — 결과에 각인. config.robot 불일치는 버튼 숨김이 1차 방어,
+      // 여기는 벨트 (숨김 전 클릭 등 레이스 대비)
+      run.robot = (res[1] && res[1].generation) || 'physicar';
+      if (cfg.robot && cfg.robot !== run.robot) {
+        var re = new Error('This evaluation is for ' + cfg.robot + ' — current robot: ' + run.robot);
+        re.unsupported = true;
+        throw re;
+      }
       if (!wd.track || !wd.track.route || !wd.track.route.waypoints) {
         throw new Error('world has no route');
       }
@@ -263,13 +274,18 @@
       });
       var wp = run.route.waypoints;
       var yaw0 = Math.atan2(wp[1][1] - wp[0][1], wp[1][0] - wp[0][0]);
-      resets.push(post('/pose', { x: wp[0][0], y: wp[0][1], yaw: yaw0 }));
+      // 출발선(웨이포인트 0)보다 뒤에 배치 — 선 위에서 시작하면 첫 통과 감지가
+      // 지터에 따라 "즉시 시작/미감지"로 갈리는 비결정 버그가 생긴다. 뒤에서
+      // 출발해 차량 중심이 선을 넘는 순간이 곧 타이머 시작(통과 감지)이 된다.
+      var BACK = 0.35;   // m — 차체(~0.2m)가 선에 걸치지 않는 여유
+      resets.push(post('/pose', { x: wp[0][0] - Math.cos(yaw0) * BACK,
+                                  y: wp[0][1] - Math.sin(yaw0) * BACK, yaw: yaw0 }));
       return Promise.all(resets);
     }).then(function () {
       if (!run) { return; }
       run.worker.postMessage({ t: 'initialize' });   // 교사 initialize → phase 응답에서 계속
     }).catch(function (e) {
-      abort('script_error', (e && e.message) || 'start failed');
+      abort(e && e.unsupported ? 'unsupported' : 'script_error', (e && e.message) || 'start failed');
     });
   }
 
@@ -380,7 +396,8 @@
     });
     var obs = { time: run.simTime,
                 pose: { x: vp.x, y: vp.y, z: vp.z, yaw: vp.yaw, speed: run.speed },
-                objects: objects, lights: lights, run: runProc };
+                objects: objects, lights: lights, run: runProc,
+                audio: { playing: audioPlaying() } };
     if (run.ackPending) { run.pendingObs = obs; return; }   // 밀리면 최신으로 대체
     sendObs(obs);
   }
