@@ -2265,6 +2265,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._json(404, {"error": "not found"})
 
 if __name__ == "__main__":
+    # Hang forensics: `kill -USR1 <pid>` dumps every thread's stack to stderr
+    # (supervisor log). The process froze whole once (all endpoints timing
+    # out, no log output) — with this, the next occurrence pinpoints the
+    # blocked frame instantly instead of guessing.
+    import faulthandler
+    faulthandler.register(signal.SIGUSR1)
     logging.info("sim_api starting, killing stale processes")
     _kill_all_gz()
     # Boot the world immediately instead of waiting for the watchdog's first
