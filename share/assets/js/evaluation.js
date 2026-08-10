@@ -209,7 +209,7 @@
     // Run command: the evaluation's default first; an edited value sticks for
     // THIS page load only (plain variable — a fresh /sim starts clean again).
     card.querySelector('#ec-cmd').value =
-      _cmdOverride || cfg.run_command || 'python3 /home/physicar/physicar_ws/run.py';
+      _cmdOverride || cfg.run_command || 'cd /home/physicar/physicar_ws/ && python3 -u run.py';
     card.querySelector('#ec-cancel').addEventListener('click', closeCard);
     card.querySelector('#ec-start').addEventListener('click', function () {
       var cmd = card.querySelector('#ec-cmd').value.trim();

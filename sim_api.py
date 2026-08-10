@@ -182,6 +182,7 @@ def _delete_world_files(world_name):
         os.path.join(WORLDS_DIR, f"{world_name}.world"),
         os.path.join(WORLDS_DIR, f"{world_name}.pcpub.json"),
         os.path.join(SHARE_DIR, "evaluations", f"{world_name}.json"),
+        os.path.join(SHARE_DIR, "evaluations", f"{world_name}.js"),
         os.path.join(SHARE_DIR, "models", world_name),
         os.path.join(SHARE_DIR, "meshes", world_name),
         os.path.join(SHARE_DIR, "routes", f"{world_name}.npy"),
@@ -221,12 +222,23 @@ def _eval_sidecar_path(world_name):
     (번들의 evaluations/<월드명>.json 이 일반 설치 루프로 그대로 여기 배치된다)"""
     return os.path.join(SHARE_DIR, "evaluations", f"{world_name}.json")
 
+def _eval_available(world_name):
+    """평가 실행 가능 여부 — config(.json)와 스크립트(.js)가 둘 다 있어야 한다."""
+    base = _eval_sidecar_path(world_name)
+    return os.path.isfile(base) and os.path.isfile(base[:-len(".json")] + ".js")
+
 def _eval_config(world_name):
-    """설치된 평가(evaluation.json) 로드 — 없거나 깨졌으면 None."""
+    """설치된 평가 로드 — <월드>.json(config 문서) + <월드>.js(스크립트) 병합.
+    스크립트는 진짜 .js 파일이라 DEV 에서 그대로 편집한다. 둘 다 있어야 유효."""
+    base = _eval_sidecar_path(world_name)
     try:
-        with open(_eval_sidecar_path(world_name)) as f:
+        with open(base) as f:
             d = json.load(f)
-        return d if isinstance(d, dict) and isinstance(d.get("script"), str) else None
+        if not isinstance(d, dict):
+            return None
+        with open(base[:-len(".json")] + ".js") as f:
+            d["script"] = f.read()
+        return d if d["script"].strip() else None
     except Exception:
         return None
 
@@ -269,16 +281,19 @@ def _install_published_world(world_id):
         # by an older sim has no evaluation sidecar, and without this backfill
         # a reinstall could never bring the evaluation in. Fetch just that one
         # file when the manifest lists it and the sidecar is missing.
-        eval_src = next((p for p in files if isinstance(p, str)
-                         and p.startswith("evaluations/") and _safe_install_path(p)), None)
-        if eval_src and not os.path.isfile(_eval_sidecar_path(world_name)):
-            tmp_eval = _eval_sidecar_path(world_name) + ".tmp"
-            os.makedirs(os.path.dirname(tmp_eval), exist_ok=True)
-            with urllib.request.urlopen(f"{WORLDS_CDN}/worlds/{world_id}/{rev}/{eval_src}",
+        for p in files:
+            if not (isinstance(p, str) and p.startswith("evaluations/") and _safe_install_path(p)):
+                continue
+            dst = os.path.join(SHARE_DIR, p)
+            if os.path.isfile(dst):
+                continue
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            tmp_eval = dst + ".tmp"
+            with urllib.request.urlopen(f"{WORLDS_CDN}/worlds/{world_id}/{rev}/{p}",
                                         timeout=30) as r, open(tmp_eval, "wb") as f:
                 shutil.copyfileobj(r, f, 1024 * 256)
-            os.replace(tmp_eval, _eval_sidecar_path(world_name))
-            logging.info("install: backfilled evaluation sidecar for cached %s", world_name)
+            os.replace(tmp_eval, dst)
+            logging.info("install: backfilled %s for cached %s", p, world_name)
         return {"ok": True, "world": f"{world_name}.world", "name": display, "cached": True}
 
     paths = []
@@ -326,7 +341,7 @@ def _install_published_world(world_id):
 # 시간초과 판정의 진실은 브라우저 러너(sim time 기준 실격)다. 여기의 wall-clock
 # 데드라인은 러너(탭)가 죽었을 때 프로세스가 영원히 남는 것을 막는 백스톱일 뿐
 # — RTF<1 이면 sim time 이 wall 보다 느리므로 넉넉히 (×2 + 30s) 잡는다.
-_RUN_DEFAULT_COMMAND = "python3 /home/physicar/physicar_ws/run.py"
+_RUN_DEFAULT_COMMAND = "cd /home/physicar/physicar_ws/ && python3 -u run.py"
 _RUN_LINE_MAX = 300     # 로그 한 줄 길이 상한
 _RUN_RATE_MAX = 30      # 스트림별 초당 로그 라인 상한 (초과분 드롭 + 요약 1줄)
 _run_lock = threading.Lock()
@@ -1738,7 +1753,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                            or OFFICIAL_WORLD_NAMES.get(world) or world,
                 "track": {"route": route, "bounds": bounds},
                 "objects": catalog,
-                "evaluation": os.path.isfile(_eval_sidecar_path(world)),
+                "evaluation": _eval_available(world),
             })
         elif self.path == "/worlds":
             worlds = sorted(glob.glob(os.path.join(WORLDS_DIR, "*.world")))
@@ -1768,7 +1783,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                               "world_id": (pub or {}).get("world_id"),
                               "size": size,
                               "official": not custom,
-                              "evaluation": os.path.isfile(_eval_sidecar_path(name)),
+                              "evaluation": _eval_available(name),
                               "deletable": custom and name not in PROTECTED_NAMES})
             # Protected (built-in) worlds first, then alphabetical
             items.sort(key=lambda x: (x["deletable"], x["name"]))
