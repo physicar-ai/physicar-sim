@@ -181,7 +181,7 @@ def _delete_world_files(world_name):
     paths = [
         os.path.join(WORLDS_DIR, f"{world_name}.world"),
         os.path.join(WORLDS_DIR, f"{world_name}.pcpub.json"),
-        os.path.join(WORLDS_DIR, f"{world_name}.evaluation.json"),
+        os.path.join(SHARE_DIR, "evaluations", f"{world_name}.json"),
         os.path.join(SHARE_DIR, "models", world_name),
         os.path.join(SHARE_DIR, "meshes", world_name),
         os.path.join(SHARE_DIR, "routes", f"{world_name}.npy"),
@@ -217,9 +217,9 @@ def _pub_sidecar(world_name):
         return None
 
 def _eval_sidecar_path(world_name):
-    """월드별 평가 사이드카 — 번들 루트의 evaluation.json 을 pcpub 사이드카와
-    같은 관례로 월드 이름에 매어 보관한다 (루트 공유 파일이면 월드끼리 충돌)."""
-    return os.path.join(WORLDS_DIR, f"{world_name}.evaluation.json")
+    """월드별 평가 문서 — 전용 폴더 share/evaluations/<월드명>.json.
+    (번들 루트의 evaluation.json 을 월드 이름에 매어 보관 — worlds/ 를 어지럽히지 않는다)"""
+    return os.path.join(SHARE_DIR, "evaluations", f"{world_name}.json")
 
 def _eval_config(world_name):
     """설치된 평가(evaluation.json) 로드 — 없거나 깨졌으면 None."""
@@ -271,6 +271,7 @@ def _install_published_world(world_id):
         # file when the manifest lists it and the sidecar is missing.
         if "evaluation.json" in files and not os.path.isfile(_eval_sidecar_path(world_name)):
             tmp_eval = _eval_sidecar_path(world_name) + ".tmp"
+            os.makedirs(os.path.dirname(tmp_eval), exist_ok=True)
             with urllib.request.urlopen(f"{WORLDS_CDN}/worlds/{world_id}/{rev}/evaluation.json",
                                         timeout=30) as r, open(tmp_eval, "wb") as f:
                 shutil.copyfileobj(r, f, 1024 * 256)
@@ -314,7 +315,9 @@ def _install_published_world(world_id):
             os.makedirs(os.path.dirname(dst), exist_ok=True)
             os.replace(os.path.join(tmp, p), dst)
         if has_eval:
-            os.replace(os.path.join(tmp, "evaluation.json"), _eval_sidecar_path(world_name))
+            dst_eval = _eval_sidecar_path(world_name)
+            os.makedirs(os.path.dirname(dst_eval), exist_ok=True)
+            os.replace(os.path.join(tmp, "evaluation.json"), dst_eval)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
