@@ -265,6 +265,17 @@ def _install_published_world(world_id):
 
     prev = _pub_sidecar(world_name)
     if prev and prev.get("rev") == rev and os.path.isfile(os.path.join(WORLDS_DIR, f"{world_name}.world")):
+        # Same-rev cache normally skips every download — but a world installed
+        # by an older sim has no evaluation sidecar, and without this backfill
+        # a reinstall could never bring the evaluation in. Fetch just that one
+        # file when the manifest lists it and the sidecar is missing.
+        if "evaluation.json" in files and not os.path.isfile(_eval_sidecar_path(world_name)):
+            tmp_eval = _eval_sidecar_path(world_name) + ".tmp"
+            with urllib.request.urlopen(f"{WORLDS_CDN}/worlds/{world_id}/{rev}/evaluation.json",
+                                        timeout=30) as r, open(tmp_eval, "wb") as f:
+                shutil.copyfileobj(r, f, 1024 * 256)
+            os.replace(tmp_eval, _eval_sidecar_path(world_name))
+            logging.info("install: backfilled evaluation sidecar for cached %s", world_name)
         return {"ok": True, "world": f"{world_name}.world", "name": display, "cached": True}
 
     paths = []
@@ -540,6 +551,18 @@ def _spawn_pose(wname):
     except Exception:
         return 'position: {z: 0.05}'
 
+def _spawn_pose_xyzq(wname):
+    """Numeric spawn pose (x, y, z, quaternion) — same math as _spawn_pose,
+    for the in-process EntityFactory path."""
+    try:
+        import numpy as np, math
+        d = np.load(os.path.join(SHARE_DIR, "routes", wname + ".npy"))
+        x, y = float(d[0, 0]), float(d[0, 1])
+        yaw = math.atan2(d[1, 1] - y, d[1, 0] - x)
+        return x, y, 0.05, (0.0, 0.0, math.sin(yaw / 2), math.cos(yaw / 2))
+    except Exception:
+        return 0.0, 0.0, 0.05, (0.0, 0.0, 0.0, 1.0)
+
 def _run_gz_cmd(*args, timeout=5):
     """Run a gz command directly (sim_api runs as physicar already)."""
     env = _gz_env()
@@ -562,6 +585,7 @@ try:
     from gz.msgs10.entity_factory_pb2 import EntityFactory as _PbEntityFactory
     from gz.msgs10.empty_pb2 import Empty as _PbEmpty
     from gz.msgs10.scene_pb2 import Scene as _PbScene
+    from gz.msgs10.world_control_pb2 import WorldControl as _PbWorldControl
     _gz_node = _GzTNode()
 except Exception:
     _gz_node = None
@@ -1287,6 +1311,52 @@ def _scan_world_lights(world):
         for stale in [n for n in _lights if n not in seen]:
             _lights.pop(stale, None)
 
+def _inplace_respawn(world):
+    """In-place respawn — WorldControl reset + vehicle re-create, no gz restart.
+
+    reset(all) restores every SDF entity in ~a tick (object poses back to
+    their world-file origins; traffic lights resurrect as their SDF-baked
+    green models even when a state swap had removed them) but DELETES
+    runtime-created entities — including the vehicle. So: reset, wait for
+    the vehicle to actually vanish (user commands are queued), re-create it
+    at the spawn pose, then rerun the boot-time light scan so preserved
+    light states are re-applied and caches/SSE resync. Returns False on any
+    failure; the caller falls back to the full world reload."""
+    if _gz_node is None:
+        return False
+    try:
+        wc = _PbWorldControl()
+        wc.reset.all = True
+        rep = _gz_request(f"/world/{world}/control", wc, _PbWorldControl, _PbBoolean, 5000)
+        if rep is None or not rep.data:
+            return False
+    except Exception:
+        logging.exception("inplace respawn: reset request failed")
+        return False
+    deadline = time.monotonic() + 5.0
+    gone = False
+    while time.monotonic() < deadline:
+        if not _entity_exists(world, VEHICLE_NAME):
+            gone = True
+            break
+        time.sleep(0.1)
+    if not gone:
+        logging.warning("inplace respawn: reset did not land (vehicle still present)")
+        return False
+    x, y, z, q = _spawn_pose_xyzq(world)
+    if not _create_entity(world, f"model://{VEHICLE_NAME}", VEHICLE_NAME, x, y, z, q):
+        logging.warning("inplace respawn: vehicle re-create request failed")
+        return False
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        if _entity_exists(world, VEHICLE_NAME):
+            _scan_world_lights(world)
+            logging.info("in-place respawn done for %s", world)
+            return True
+        time.sleep(0.1)
+    logging.warning("inplace respawn: vehicle did not appear after create")
+    return False
+
 # ─── Track bounds ──────────────────────────────────────────────────────
 _track_bounds_cache = {}
 
@@ -1813,14 +1883,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif self.path == "/respawn":
             with _lock:
                 world = _current_world
+                switching = _switching
             if not world:
                 self._json(404, {"error": "no world running"})
                 return
-            # Reload the whole world so all objects (vehicle and built-in
-            # models) return to their original positions.
+            if switching:
+                self._json(409, {"error": "world switch in progress"})
+                return
+            # In-place reset (~1 s): world reset + vehicle re-create, scene
+            # and sensors stay up. Any failure falls back to the old full
+            # world reload (gz restart, ~6 s).
+            if _inplace_respawn(world):
+                self._json(200, {"ok": True, "world": f"{world}.world", "inplace": True})
+                return
+            logging.warning("in-place respawn failed - falling back to full reload")
             _fail_count = 0
             threading.Thread(target=start_sim, args=(f"{world}.world",), daemon=True).start()
-            self._json(200, {"ok": True, "world": f"{world}.world"})
+            self._json(200, {"ok": True, "world": f"{world}.world", "inplace": False})
         elif self.path == "/switch":
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length)) if length else {}

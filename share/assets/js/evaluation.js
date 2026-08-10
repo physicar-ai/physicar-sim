@@ -81,7 +81,7 @@
   }
 
   // ── UI: ▶ 버튼 (respawn 옆) + 시작 카드 + 진행 HUD + 결과 카드 ──
-  var css = '#eval-btn{margin-left:6px}#eval-btn:disabled{opacity:.4}'
+  var css = '#eval-btn:disabled{opacity:.4}'
     + '.eval-card{position:absolute;top:56px;left:50%;transform:translateX(-50%);z-index:60;'
     + 'background:rgba(20,20,32,.94);color:#eee;border:1px solid #444;border-radius:8px;'
     + 'padding:14px 16px;min-width:280px;max-width:min(440px,92vw);font:13px/1.5 sans-serif}'
@@ -106,12 +106,14 @@
   var btn = document.createElement('button');
   btn.id = 'eval-btn';
   btn.title = 'Evaluation';
-  btn.textContent = '▶';
+  // Racing flag glyph — text glyph like the toolbar's other icons (gear,
+  // respawn arrow), so it inherits the shared chip styling in gzweb.css
+  btn.innerHTML = '<span class="eval-icon">&#x2691;</span>';
   btn.disabled = true;
   btn.addEventListener('click', openStartCard);
   function mountBtn() {
-    var rb = document.getElementById('respawn-btn');
-    if (rb && rb.parentNode) { rb.parentNode.insertBefore(btn, rb.nextSibling); }
+    var slot = document.getElementById('toolbar-left');
+    if (slot) { slot.appendChild(btn); }
     else { setTimeout(mountBtn, 500); }
   }
   mountBtn();

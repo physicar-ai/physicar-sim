@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <title>Gazebo Web</title>
-  <link rel="stylesheet" href="assets/css/gzweb.css?v=13" id="pc-css">
+  <link rel="stylesheet" href="assets/css/gzweb.css?v=14" id="pc-css">
   <script>
   // 정적 자산 로더 — 배포 태그가 R2 에 있으면 worlds.physicar.ai(엣지 캐시)에서,
   // 아니면 로컬(EC2)에서. worldpub: DEV 모드·태그 밖·더티 트리는 assets_rev 가
@@ -16,8 +16,8 @@
       'assets/lib/gz3d.js?v=2',
       'assets/js/gz-scene.js?v=4',
       'assets/js/gz-interact.js?v=3',
-      'assets/js/gzweb.js?v=56',
-      'assets/js/evaluation.js?v=1'
+      'assets/js/gzweb.js?v=57',
+      'assets/js/evaluation.js?v=2'
     ];
     var ready = { dom: document.readyState !== 'loading', js: false };
     function maybeInit() {
@@ -57,9 +57,7 @@
   <!-- Toolbar: 3-column grid — respawn left, world chip TRUE center at any
        width, settings right. The chip opens the world modal. -->
   <div id="toolbar">
-  <button id="respawn-btn" onclick="doRespawn()" title="Respawn" disabled>
-    <span class="respawn-icon">&#x21bb;</span>
-  </button>
+  <div id="toolbar-left"><!-- evaluation.js mounts its button here --></div>
   <button id="world-chip" class="disabled" onclick="openWorldModal()" title="Select world">Loading...</button>
   <div id="settings">
     <button id="settings-btn" onclick="toggleSettings()" title="Settings"><span class="settings-icon">&#x2699;</span></button>
@@ -73,6 +71,8 @@
         Brightness
         <span class="b-line"><input type="range" id="brightness-slider" min="0.2" max="2" step="0.1" value="1"
           oninput="setBrightness(this.value)"><span id="brightness-val">1.0</span></span></label>
+      <button id="respawn-btn" onclick="doRespawn()" title="Reset all objects to their start state" disabled>
+        <span class="respawn-icon">&#x21bb;</span>Respawn</button>
     </div>
   </div>
   </div><!-- /#toolbar -->

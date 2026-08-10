@@ -14,26 +14,33 @@ body { background: #1a1a2e; color: #eee; font-family: sans-serif; overflow: hidd
 #toolbar > * { pointer-events: auto; }
 /* Explicit columns: with the chip display:none (embedded) auto-placement
    would promote settings into the center cell. */
-#respawn-btn { justify-self: start; grid-column: 1; }
+#toolbar-left { justify-self: start; grid-column: 1; display: flex; }
 #world-chip { justify-self: center; grid-column: 2; }
 #settings { justify-self: end; grid-column: 3; }
 /* One chip family for every toolbar control — same height, radius and colors
    at every width. */
-#respawn-btn, #world-chip, #settings {
+#eval-btn, #world-chip, #settings {
   height: calc(var(--u)*2); min-width: calc(var(--u)*2.3);
   background: rgba(0,0,0,0.7); border: 1px solid #555;
   border-radius: calc(var(--u)*0.46); color: #eee; cursor: pointer;
   transition: background 0.15s, border-color 0.15s; padding: 0;
   font-size: var(--u); }
-#respawn-btn, #settings { display: flex; align-items: center; justify-content: center;
+#eval-btn, #settings { display: flex; align-items: center; justify-content: center;
   /* icon buttons are perfect circles (the world chip stays a rounded rect) */
   width: calc(var(--u)*2); min-width: calc(var(--u)*2); border-radius: 50%; }
-#respawn-btn:hover:not(:disabled), #world-chip:hover:not(.disabled),
+#eval-btn:hover:not(:disabled), #world-chip:hover:not(.disabled),
 #settings:hover { background: rgba(60,60,100,0.9); border-color: #888; }
-#respawn-btn:active:not(:disabled) { background: rgba(40,120,80,0.9); border-color: #4ade80; }
+#eval-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.eval-icon { font-size: calc(var(--u)*1.23); line-height: 1; }
+/* Respawn lives in the settings menu — a full-width action row under a divider */
+#settings-menu #respawn-btn { display: flex; align-items: center; gap: calc(var(--u)*0.46);
+  width: 100%; background: none; border: none; border-top: 1px solid #444;
+  margin-top: calc(var(--u)*0.3); padding: calc(var(--u)*0.4) calc(var(--u)*0.38);
+  color: #eee; font-size: var(--u); cursor: pointer; text-align: left; }
+#settings-menu #respawn-btn:hover:not(:disabled) { background: #3a3a5a; }
 #respawn-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 #respawn-btn.busy { opacity: 0.6; cursor: wait; }
-.respawn-icon { font-size: calc(var(--u)*1.23); line-height: 1; font-weight: bold; }
+.respawn-icon { font-size: calc(var(--u)*1.1); line-height: 1; font-weight: bold; }
 #respawn-btn.busy .respawn-icon { animation: spin 0.6s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 #container { width: 100vw; height: 100vh; }
