@@ -85,6 +85,16 @@
       lt[l.name] = (l.yellow_left !== undefined && l.yellow_left > 0) ? 'yellow' : l.state;
     });
     lights = lt;
+    // World replacement in progress (switch OR same-world reload — both pass
+    // through the server's switching flag): the edited run command belongs to
+    // the world instance that is going away, so fall back to the evaluation's
+    // default. A pose-only Reset never sets this flag and keeps the override.
+    if (d.switching) {
+      _cmdOverride = null;
+      // A start card left open would resurrect the stale command on Start —
+      // close it (result cards have no #ec-cmd and stay).
+      if (card && card.querySelector('#ec-cmd')) { closeCard(); }
+    }
     if (d.current !== availWorld) { refreshAvail(d.current); }
     if (run && d.current !== run.world) { abort('script_error', 'World changed during evaluation'); }
     if (run && !d.running) { abort('script_error', 'Simulator stopped during evaluation'); }
@@ -136,7 +146,12 @@
     fetch(API + '/evaluation')
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (d) { if (availWorld === world) { evalDoc = d; updateBtn(); } })
-      .catch(function () {});
+      .catch(function () {
+        // Network failure (server mid-restart 등) — availWorld 를 비워두면
+        // 다음 SSE state 틱이 world 불일치로 재조회를 트리거한다. 이게 없으면
+        // 한 번의 실패로 evalDoc 이 영영 null — 평가 버튼이 조용히 사라진다.
+        if (availWorld === world) { availWorld = null; }
+      });
   }
 
   // ── UI: ▶ 버튼 (respawn 옆) + 시작 카드 + 진행 HUD + 결과 카드 ──
@@ -191,7 +206,7 @@
   }
 
   var card = null;
-  var _cmdOverride = null;   // edited run command — page lifetime only
+  var _cmdOverride = null;   // edited run command — page lifetime, cleared on world switch/reload
   function closeCard() { if (card) { card.remove(); card = null; } }
   function openStartCard() {
     if (!evalDoc || run) { return; }
@@ -456,8 +471,18 @@
   // 콜백은 전역 run 세션을 게이트하므로 세션이 끝나면 자연히 무시된다.
   var _topics = {};
   function subscribeOnce(name, messageType, callback) {
-    if (_topics[name]) { return; }
-    _topics[name] = new Topic({ gz: gz, name: name, messageType: messageType, callback: callback });
+    // Cache per topic AND per gz connection: a respawn/world switch replaces
+    // the gz websocket with a NEW instance, and a subscription made on the
+    // old (dead) socket never delivers again. Without the instance check the
+    // stale cache silently starved the evaluation of observations — the lap
+    // timer never started after any respawn. (Topic has no unsubscribe; the
+    // dead socket's entry is simply abandoned.)
+    var cur = _topics[name];
+    if (cur && cur.gzInstance === window.gz) { return; }
+    _topics[name] = {
+      gzInstance: window.gz,
+      topic: new Topic({ gz: gz, name: name, messageType: messageType, callback: callback })
+    };
   }
 
   function beginObservation() {
@@ -469,9 +494,15 @@
       abort('script_error', 'sim connection unavailable');
       return;
     }
+    // NOTE: subscribeOnce caches the Topic (and THIS callback closure) per
+    // world FOREVER. On the second+ evaluation of a page the subscription is
+    // already live, so without the run.observing gate the observation flow
+    // would start the moment `run` exists — evaluate() would tick DURING
+    // initialize(), snapshot the PRE-reset object poses as the baseline and
+    // then "restore" everything back to the stale spots, undoing initialize.
     subscribeOnce('/world/' + run.world + '/stats', 'gz.msgs.WorldStatistics',
       function (msg) {
-        if (!run || run.done) { return; }
+        if (!run || run.done || !run.observing) { return; }
         var t = (msg.sim_time ? (+msg.sim_time.sec || 0) + (+msg.sim_time.nsec || 0) / 1e9 : null);
         if (t === null) { return; }
         run.simTime = t;
@@ -482,7 +513,7 @@
       });
     subscribeOnce('/world/' + run.world + '/dynamic_pose/info', 'gz.msgs.Pose_V',
       function (msg) {
-        if (!run || run.done) { return; }
+        if (!run || run.done || !run.observing) { return; }
         for (var i = 0; i < (msg.pose || []).length; i++) {
           var p = msg.pose[i];
           var yaw = 0;

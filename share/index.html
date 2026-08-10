@@ -3,11 +3,12 @@
 <head>
   <meta charset="utf-8" />
   <title>Gazebo Web</title>
-  <link rel="stylesheet" href="assets/css/gzweb.css?v=17" id="pc-css">
+  <link rel="stylesheet" href="assets/css/gzweb.css?v=18" id="pc-css">
   <script>
-  // 정적 자산 로더 — 배포 태그가 R2 에 있으면 worlds.physicar.ai(엣지 캐시)에서,
-  // 아니면 로컬(EC2)에서. worldpub: DEV 모드·태그 밖·더티 트리는 assets_rev 가
-  // 없어 항상 로컬 → 개발 흐름 무변화. complete.json = 업로드 커밋 포인트.
+  // 코드 자산(JS/CSS)은 DEV 든 배포든 항상 원본 서버에서 — 정책. CDN 은
+  // 콘텐츠(dae·텍스처: worlds/<id>/<rev> + sim-assets/<assets_rev>/meshes)
+  // 전용이며 gzweb.js 의 _refreshWorldPub/_worldPubReady 가 담당한다.
+  // (예전 static_rev 기반 CDN 코드 로딩은 폐기 — 부트 왕복 2회도 함께 제거)
   (function () {
     var FILES = [
       'assets/lib/protobuf.min.js?v=1',
@@ -16,40 +17,23 @@
       'assets/lib/gz3d.js?v=2',
       'assets/js/gz-scene.js?v=4',
       'assets/js/gz-interact.js?v=4',
-      'assets/js/gzweb.js?v=64',
-      'assets/js/evaluation.js?v=18'
+      'assets/js/gzweb.js?v=68',
+      'assets/js/evaluation.js?v=22'
     ];
     var ready = { dom: document.readyState !== 'loading', js: false };
     function maybeInit() {
       if (ready.dom && ready.js && typeof window.init === 'function') { window.init(); }
     }
     document.addEventListener('DOMContentLoaded', function () { ready.dom = true; maybeInit(); });
-    function start(base) {
-      if (base) {
-        var css = document.getElementById('pc-css');
-        css.href = base + css.getAttribute('href');
+    FILES.forEach(function (f, i) {
+      var s = document.createElement('script');
+      s.src = f;
+      s.async = false;   // ordered async — 실행 순서 보장
+      if (i === FILES.length - 1) {
+        s.onload = function () { ready.js = true; maybeInit(); };
       }
-      FILES.forEach(function (f, i) {
-        var s = document.createElement('script');
-        s.src = (base || '') + f;
-        s.async = false;   // ordered async — 실행 순서 보장
-        if (i === FILES.length - 1) {
-          s.onload = function () { ready.js = true; maybeInit(); };
-        }
-        document.head.appendChild(s);
-      });
-    }
-    fetch('/sim/api/worldpub')
-      .then(function (r) { return r.json(); })
-      .then(function (d) {
-        if (!d || !d.static_rev) { return ''; }
-        var base = (d.cdn || 'https://worlds.physicar.ai') + '/sim-assets/' + d.static_rev + '/';
-        return fetch(base + 'complete.json')
-          .then(function (r) { return r.ok ? base : ''; })
-          .catch(function () { return ''; });
-      })
-      .catch(function () { return ''; })
-      .then(start);
+      document.head.appendChild(s);
+    });
   })();
   </script>
 </head>
@@ -71,8 +55,10 @@
         Brightness
         <span class="b-line"><input type="range" id="brightness-slider" min="0.2" max="2" step="0.1" value="1"
           oninput="setBrightness(this.value)"><span id="brightness-val">1.0</span></span></label>
-      <button id="respawn-btn" onclick="doRespawn()" title="Reset all objects to their start state" disabled>
-        <span class="respawn-icon">&#x21bb;</span>Respawn</button>
+      <button id="reset-btn" onclick="doReset()" title="Put every object and the car back at its start pose — instant, no world reload">
+        <span class="respawn-icon">&#x21ba;</span>Reset</button>
+      <button id="respawn-btn" onclick="doRespawn()" title="Reload the whole world — use when the world misbehaves" disabled>
+        <span class="respawn-icon">&#x21bb;</span>Reload World</button>
     </div>
   </div>
   </div><!-- /#toolbar -->

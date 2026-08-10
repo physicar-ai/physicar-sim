@@ -1384,8 +1384,22 @@ def _scan_world_lights(world):
         for stale in [n for n in _lights if n not in seen]:
             _lights.pop(stale, None)
 
+# DO NOT RE-ENABLE without fixing gz upstream first. WorldControl reset(all)
+# resets physics/ECM but the Sensors system's RENDER SCENE desyncs: stale
+# visual entities linger ("Visual already exists") and the re-created
+# vehicle's sensors fail to attach ("Failed to create sensor ... Parent not
+# found with ID") — the OLD sensor instances keep publishing at full rate
+# with FROZEN content. Verified here: 0.0% camera pixel change across a
+# 1.5 m drive, lidar-odom velocity pinned at 0, full gz restart required to
+# recover. Upstream: https://github.com/gazebosim/gz-sim/issues/2851 (open).
+_INPLACE_RESPAWN_ENABLED = False
+
 def _inplace_respawn(world):
     """In-place respawn — WorldControl reset + vehicle re-create, no gz restart.
+
+    BROKEN on current gz-sim (see _INPLACE_RESPAWN_ENABLED above): rendering
+    sensors freeze after the reset+re-create. Kept for the day upstream
+    fixes sensor scene rebuild.
 
     reset(all) restores every SDF entity in ~a tick (object poses back to
     their world-file origins; traffic lights resurrect as their SDF-baked
@@ -1995,6 +2009,45 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return
             _save_brightness(v)
             self._json(200, {"ok": True, "value": _brightness})
+        elif self.path == "/reset":
+            # Light reset — everything back to its start pose WITHOUT touching
+            # gz world state. WorldControl reset is off-limits (it desyncs the
+            # sensor render scene, see _INPLACE_RESPAWN_ENABLED); this is pure
+            # pose commands instead: movable objects and lights to their
+            # origins, the vehicle to its spawn point. Light STATES are
+            # preserved (same contract as respawn). Completion semantics: the
+            # pose calls confirm application, so the 200 means "in place".
+            with _lock:
+                world = _current_world
+                switching = _switching
+            if not world or switching:
+                self._json(409, {"error": "world not ready"})
+                return
+            reset_names = []
+            for it in (_get_builtin_obstacles(world) or []):
+                o = it.get("origin")
+                if not it.get("movable") or it.get("type") == "wall" or not o:
+                    continue
+                name = it["name"]
+                with _lock:
+                    is_light = name in _lights
+                if is_light:
+                    ok, _sig, _err = _move_light(world, name, o["x"], o["y"], o.get("yaw", 0.0))
+                    if ok:
+                        _wait_pose_applied(name, o["x"], o["y"], o.get("yaw"))
+                        reset_names.append(name)
+                    continue
+                if _set_entity_pose(world, name, o["x"], o["y"], o.get("z", 0.0),
+                                    o.get("yaw", 0.0)):
+                    _wait_pose_applied(name, o["x"], o["y"], o.get("yaw"))
+                    reset_names.append(name)
+            vx, vy, _vz, vq = _spawn_pose_xyzq(world)
+            vyaw = 2.0 * math.atan2(vq[2], vq[3])
+            if _set_entity_pose(world, VEHICLE_NAME, vx, vy, 0.05, vyaw):
+                _wait_pose_applied(VEHICLE_NAME, vx, vy)
+                reset_names.append(VEHICLE_NAME)
+            logging.info("light reset done (%d entities)", len(reset_names))
+            self._json(200, {"ok": True, "reset": reset_names})
         elif self.path == "/respawn":
             with _lock:
                 world = _current_world
@@ -2005,13 +2058,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if switching:
                 self._json(409, {"error": "world switch in progress"})
                 return
-            # In-place reset (~1 s): world reset + vehicle re-create, scene
-            # and sensors stay up. Any failure falls back to the old full
-            # world reload (gz restart, ~6 s).
-            if _inplace_respawn(world):
+            # In-place reset is gated off — see _INPLACE_RESPAWN_ENABLED for
+            # the forensic note (rendering sensors freeze after WorldControl
+            # reset; gz-sim#2851). Respawn stays the full reload until then.
+            if _INPLACE_RESPAWN_ENABLED and _inplace_respawn(world):
                 self._json(200, {"ok": True, "world": f"{world}.world", "inplace": True})
                 return
-            logging.warning("in-place respawn failed - falling back to full reload")
             _fail_count = 0
             threading.Thread(target=start_sim, args=(f"{world}.world",), daemon=True).start()
             self._json(200, {"ok": True, "world": f"{world}.world", "inplace": False})

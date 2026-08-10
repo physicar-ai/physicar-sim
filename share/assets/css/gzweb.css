@@ -32,15 +32,20 @@ body { background: #1a1a2e; color: #eee; font-family: sans-serif; overflow: hidd
 #settings:hover { background: rgba(60,60,100,0.9); border-color: #888; }
 #eval-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 .eval-icon { font-size: calc(var(--u)*1.23); line-height: 1; }
-/* Respawn lives in the settings menu — a full-width action row under a divider */
+/* Reset / Reload World — full-width action rows in the settings menu.
+   Reset = pose-only return to start (instant); Reload World = full reload. */
+#settings-menu #reset-btn,
 #settings-menu #respawn-btn { display: flex; align-items: center; gap: calc(var(--u)*0.46);
-  width: 100%; background: none; border: none; border-top: 1px solid #444;
-  margin-top: calc(var(--u)*0.3); padding: calc(var(--u)*0.4) calc(var(--u)*0.38);
+  width: 100%; background: none; border: none;
+  padding: calc(var(--u)*0.4) calc(var(--u)*0.38);
   color: #eee; font-size: var(--u); cursor: pointer; text-align: left; }
+#settings-menu #reset-btn { border-top: 1px solid #444; margin-top: calc(var(--u)*0.3); }
+#settings-menu #reset-btn:hover:not(:disabled),
 #settings-menu #respawn-btn:hover:not(:disabled) { background: #3a3a5a; }
-#respawn-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-#respawn-btn.busy { opacity: 0.6; cursor: wait; }
+#reset-btn:disabled, #respawn-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+#reset-btn.busy, #respawn-btn.busy { opacity: 0.6; cursor: wait; }
 .respawn-icon { font-size: calc(var(--u)*1.1); line-height: 1; font-weight: bold; }
+#reset-btn.busy .respawn-icon,
 #respawn-btn.busy .respawn-icon { animation: spin 0.6s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 #container { width: 100vw; height: 100vh; }
