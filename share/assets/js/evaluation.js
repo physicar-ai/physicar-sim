@@ -2,7 +2,8 @@
 //
 // 공리 계약 (WB evaluation.json v1):
 //   관측  sim.state = { time, pose, objects, lights, run }  (전지적 3인칭 — 센서 없음)
-//   개입  sim.teleport / sim.moveObject / sim.setLight / (run start·stop 은 러너 몫)
+//   개입  sim.teleport / sim.moveObject / sim.setLight / sim.overlay — 러너가
+//         sim_api 로 릴레이하며, 포즈 API 는 적용 확인 후 응답 (완료 보장)
 //   판정  sim.result(v) / sim.finish(v?) — 시간초과(sim time)=실격은 러너가 강제
 // 불변식: 정지성(워치독)·전체성(finished|timeout|script_error 중 하나로 종결)·
 //         단일성(verdict 1회)·폐쇄성(Worker 샌드박스, sim.* 외 경로 차단)
@@ -25,10 +26,57 @@
     .then(function (d) { robot = (d && d.generation) || 'physicar'; updateBtn(); })
     .catch(function () { robot = 'physicar'; updateBtn(); });
 
+  // Run ownership id — sent with the SSE connection AND /evaluation/run.
+  // The server binds the run to this SSE stream: the moment the stream dies
+  // (tab closed mid-evaluation) the orphaned student process is killed
+  // server-side. No polling, no heartbeat — the stream itself is the signal.
+  var CID = 'w' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+
+  // ── Terminal mode — run the command in a REAL VSCode terminal ──
+  // Preferred when embedded under the extension (app.html relays these
+  // messages up to it): the user watches the logs where they always run
+  // their code, and shell integration reports the exit code back. Falls
+  // back to the sim server's background spawn (SSE-owned) when there is
+  // no extension / no shell integration / a plain browser tab.
+  var _evalAckWait = null;
+  window.addEventListener('message', function (e) {
+    var m = e.data || {};
+    if (m.type === 'physicar-eval-ack') {
+      if (_evalAckWait) { _evalAckWait(true); _evalAckWait = null; }
+    } else if (m.type === 'physicar-eval-unavailable') {
+      if (_evalAckWait) { _evalAckWait(false); _evalAckWait = null; }
+    } else if (m.type === 'physicar-eval-busy') {
+      if (_evalAckWait) { _evalAckWait('busy'); _evalAckWait = null; }
+    } else if (m.type === 'physicar-eval-exit') {
+      if (!run || !run.terminalMode) { return; }
+      runProc = { running: false, exit_code: m.code };
+      // Same fail-fast contract as the server-spawn exit event: an error
+      // exit can never finish the lap. Clean exit (0/null) keeps observing.
+      if (m.code !== null && m.code !== undefined && m.code !== 0) {
+        abort('script_error', 'Run command exited with code ' + m.code +
+              ' (see the Evaluation terminal)');
+      }
+    }
+  });
+  function requestTerminalRun(cmd) {
+    return new Promise(function (resolve) {
+      if (window.parent === window) { resolve(false); return; }   // plain tab
+      var done = false;
+      var to = setTimeout(function () {
+        if (!done) { done = true; _evalAckWait = null; resolve(false); }
+      }, 1500);
+      _evalAckWait = function (ok) {
+        if (!done) { done = true; clearTimeout(to); resolve(ok); }
+      };
+      try { window.parent.postMessage({ type: 'physicar-eval-run', command: cmd }, '*'); }
+      catch (e) { clearTimeout(to); done = true; _evalAckWait = null; resolve(false); }
+    });
+  }
+
   // ── SSE (자체 연결) — 신호등·run 이벤트·월드 전환 감지 ──
   var lights = {};         // name -> 'red'|'green'|'yellow'
   var runProc = { running: false, exit_code: null };
-  var es = new EventSource(API + '/events');
+  var es = new EventSource(API + '/events?cid=' + CID);
   es.addEventListener('state', function (ev) {
     var d; try { d = JSON.parse(ev.data); } catch (e) { return; }
     simRunning = !!d.running;
@@ -45,7 +93,18 @@
   es.addEventListener('run', function (ev) {
     var d; try { d = JSON.parse(ev.data); } catch (e) { return; }
     if (d.phase === 'start') { runProc = { running: true, exit_code: null }; }
-    if (d.phase === 'exit') { runProc = { running: false, exit_code: d.exit_code }; }
+    if (d.phase === 'exit') {
+      runProc = { running: false, exit_code: d.exit_code };
+      // An error exit (missing file, crash, non-zero code) can never finish
+      // the lap — fail the evaluation right away instead of idling with the
+      // HUD until the time limit. A clean exit (0) keeps observing: the car
+      // may still be rolling across the finish line. (A Stop-button kill
+      // clears `run` before this event lands, so it stays a no-op there.
+      // Terminal-mode runs get their exit from the extension instead.)
+      if (run && !run.terminalMode && d.exit_code !== null && d.exit_code !== 0) {
+        abort('script_error', 'Run command exited with code ' + d.exit_code);
+      }
+    }
     if (d.phase === 'log' && run) { pushLog(d.stream, d.line); }
   });
 
@@ -81,22 +140,27 @@
   }
 
   // ── UI: ▶ 버튼 (respawn 옆) + 시작 카드 + 진행 HUD + 결과 카드 ──
+  // Bottom-anchored: the run HUD and the cards must not cover the road
+  // ahead (the camera looks forward/up) — the lower edge is the least
+  // intrusive spot. Sits above #gz-toast's transient zone.
   var css = '#eval-btn:disabled{opacity:.4}'
-    + '.eval-card{position:absolute;top:56px;left:50%;transform:translateX(-50%);z-index:60;'
+    + '.eval-card{position:absolute;bottom:56px;left:50%;transform:translateX(-50%);z-index:60;'
     + 'background:rgba(20,20,32,.94);color:#eee;border:1px solid #444;border-radius:8px;'
-    + 'padding:14px 16px;min-width:280px;max-width:min(440px,92vw);font:13px/1.5 sans-serif}'
+    + 'padding:14px 16px;min-width:min(480px,90vw);max-width:min(680px,92vw);font:13px/1.5 sans-serif}'
     + '.eval-card h4{margin:0 0 6px;font-size:14px}'
     + '.eval-card .ec-desc{color:#bbb;margin-bottom:8px}'
-    + '.eval-card input{width:100%;box-sizing:border-box;background:#111;color:#eee;'
-    + 'border:1px solid #555;border-radius:4px;padding:5px 7px;font:12px monospace}'
+    + '.eval-card textarea{width:100%;box-sizing:border-box;background:#111;color:#eee;'
+    + 'border:1px solid #555;border-radius:4px;padding:5px 7px;font:12px/1.5 monospace;'
+    + 'resize:vertical;min-height:44px;white-space:pre-wrap;word-break:break-all}'
     + '.eval-card .ec-row{display:flex;gap:8px;justify-content:flex-end;margin-top:10px}'
     + '.eval-card button{background:#2a2a44;color:#eee;border:1px solid #555;border-radius:4px;'
     + 'padding:5px 14px;cursor:pointer}.eval-card button.primary{background:#4a3f8f}'
-    + '.eval-hud{position:absolute;top:8px;left:50%;transform:translateX(-50%);z-index:55;'
-    + 'background:rgba(20,20,32,.88);color:#fff;border-radius:8px;padding:6px 16px;'
+    + '.eval-hud{position:absolute;bottom:10px;left:50%;transform:translateX(-50%);z-index:55;'
+    + 'background:rgba(20,20,32,.88);color:#fff;border-radius:8px;padding:6px 20px;'
+    + 'min-width:min(560px,90vw);max-width:92vw;box-sizing:border-box;'
     + 'text-align:center;font:12px sans-serif;pointer-events:auto}'
     + '.eval-hud .eh-value{font:700 20px/1.2 monospace}'
-    + '.eval-hud .eh-sub{color:#aaa}'
+    + '.eval-hud .eh-sub{color:#aaa;font-family:monospace;font-size:10px;word-break:break-all}'
     + '.eval-log{max-height:60px;overflow:hidden;color:#8a8;text-align:left;'
     + 'font:10px/1.4 monospace;white-space:pre-wrap;word-break:break-all}';
   var st = document.createElement('style');
@@ -127,6 +191,7 @@
   }
 
   var card = null;
+  var _cmdOverride = null;   // edited run command — page lifetime only
   function closeCard() { if (card) { card.remove(); card = null; } }
   function openStartCard() {
     if (!evalDoc || run) { return; }
@@ -137,14 +202,18 @@
     card.innerHTML = '<h4>Evaluation</h4>'
       + '<div class="ec-desc"></div>'
       + '<label style="font-size:11px;color:#999">Run command</label>'
-      + '<input id="ec-cmd" spellcheck="false">'
+      + '<textarea id="ec-cmd" rows="2" spellcheck="false"></textarea>'
       + '<div class="ec-row"><button id="ec-cancel">Cancel</button>'
       + '<button id="ec-start" class="primary">Start</button></div>';
     card.querySelector('.ec-desc').textContent = cfg.description || '';
-    card.querySelector('#ec-cmd').value = cfg.run_command || 'python3 /home/physicar/physicar_ws/run.py';
+    // Run command: the evaluation's default first; an edited value sticks for
+    // THIS page load only (plain variable — a fresh /sim starts clean again).
+    card.querySelector('#ec-cmd').value =
+      _cmdOverride || cfg.run_command || 'python3 /home/physicar/physicar_ws/run.py';
     card.querySelector('#ec-cancel').addEventListener('click', closeCard);
     card.querySelector('#ec-start').addEventListener('click', function () {
       var cmd = card.querySelector('#ec-cmd').value.trim();
+      _cmdOverride = cmd;
       closeCard();
       start(cmd);
     });
@@ -172,35 +241,48 @@
   var logLines = [];
   function pushLog(stream, line) {
     logLines.push((stream === 'stderr' ? '! ' : '') + line);
-    logLines = logLines.slice(-4);
-    if (hud) { hud.querySelector('.eval-log').textContent = logLines.join('\n'); }
+    // Keep a deeper tail than the HUD shows — the failure result card
+    // replays it so error tracebacks stay readable after the HUD is gone.
+    logLines = logLines.slice(-12);
+    if (hud) { hud.querySelector('.eval-log').textContent = logLines.slice(-4).join('\n'); }
   }
   function showResult(outcome, value, reason) {
     if (hud) { hud.remove(); hud = null; }
     closeCard();
     card = document.createElement('div');
     card.className = 'eval-card';
+    var failed = outcome !== 'finished' && outcome !== 'stopped';
     var head = outcome === 'finished' ? '✓ Finished'
       : outcome === 'timeout' ? '✕ Time limit exceeded (disqualified)'
       : outcome === 'stopped' ? 'Stopped'
       : outcome === 'unsupported' ? '✕ Robot not supported'
       : '⚠ Script error';
     card.innerHTML = '<h4></h4><div class="ec-desc"></div>'
+      + '<div class="ec-log" style="display:none;color:#e88;font:10px/1.4 monospace;'
+      + 'white-space:pre-wrap;word-break:break-all;max-height:110px;overflow-y:auto;'
+      + 'background:#111;border:1px solid #533;border-radius:4px;padding:5px 7px;margin-top:6px"></div>'
       + '<div class="eh-value" style="font:700 22px monospace"></div>'
       + '<div class="ec-row"><button class="primary">Close</button></div>';
     card.querySelector('h4').textContent = head;
+    if (failed) { card.querySelector('h4').style.color = '#f87171'; }
     card.querySelector('.ec-desc').textContent = reason || '';
+    // Failure: the HUD (and its log tail) is gone by now — carry the last
+    // process output into the card so the actual error text stays readable.
+    if (failed && logLines.length) {
+      var lg = card.querySelector('.ec-log');
+      lg.textContent = logLines.join('\n');
+      lg.style.display = '';
+    }
     card.querySelector('.eh-value').textContent =
       (outcome === 'finished' && value !== null && value !== undefined) ? (+value).toFixed(2) : '';
     card.querySelector('button').addEventListener('click', closeCard);
     document.body.appendChild(card);
   }
 
-  // ── Worker 하네스 — 교사 스크립트 앞에 붙는 샌드박스·sim 구현 ──
-  // 폐쇄성: 밖으로 나가는 전역 제거. 관측은 obs 메시지로만, 개입은 action 으로만.
-  // ── Worker 하네스 — 샌드박스 + 공리만. 정리(offTrack 등)는 스크립트가 자체 구현 ──
-  // 관측: sim.state / sim.config / sim.track / sim.origins
-  // 개입: teleport / moveObject / setLight / overlay   판정: result / finish
+  // ── Worker 하네스 — 교사 스크립트 앞에 붙는 프렐류드 ──
+  // 관측: sim.state / sim.config / sim.track / sim.origins (obs 메시지 푸시)
+  // 개입: teleport / moveObject / setLight / overlay (러너가 sim_api 릴레이)
+  // 판정: result / finish   정리(offTrack 등)는 스크립트가 자체 구현
   var HARNESS = [
     'self.fetch=undefined;self.XMLHttpRequest=undefined;self.importScripts=undefined;',
     'self.WebSocket=undefined;self.EventSource=undefined;',
@@ -214,11 +296,26 @@
     ' setLight:function(n,s){__post({t:"action",name:"setLight",args:{name:n,state:s}});},',
     ' overlay:function(tx){__post({t:"action",name:"overlay",args:{text:String(tx).slice(0,300)}});}',
     '};',
+    // Default prep — used ONLY when the script defines no initialize():
+    // everything to its origin — obstacles to their published origins, the
+    // car to its spawn point (waypoint 0, facing the route). Anything more
+    // opinionated (e.g. a lap timer parking the car BEHIND the start line)
+    // is rule-specific and belongs in the individual evaluation script.
+    'function __defaultInit(s){',
+    ' for(var n in s.origins){s.moveObject(n,s.origins[n]);}',
+    ' var wp=s.track.waypoints;',
+    ' var yaw=Math.atan2(wp[1][1]-wp[0][1],wp[1][0]-wp[0][0]);',
+    ' s.teleport({x:wp[0][0],y:wp[0][1],yaw:yaw});',
+    '}',
     'self.onmessage=function(e){var m=e.data;try{',
     ' if(m.t==="boot"){sim.config=m.config;sim.track=m.route;sim.origins=m.origins;__post({t:"ack"});}',
     ' else if(m.t==="initialize"){',
-    '  if(typeof initialize==="function"){initialize(sim);}',
-    '  __post({t:"phase",phase:"initialized"});}',
+    // The script's initialize() is the SOLE pre-start preparation when it
+    // exists. Sync or async — the runner proceeds only after its promise
+    // settles (its actions are then drained by the barrier).
+    '  Promise.resolve((typeof initialize==="function"?initialize:__defaultInit)(sim))',
+    '   .then(function(){__post({t:"phase",phase:"initialized"});})',
+    '   .catch(function(err){__post({t:"error",message:String(err&&err.message||err)});});}',
     ' else if(m.t==="obs"){sim.state=m.o;evaluate(sim);__post({t:"ack"});}',
     '}catch(err){__post({t:"error",message:String(err&&err.message||err)});}};',
     ''
@@ -231,10 +328,17 @@
     var world = availWorld;
     run = { world: world, cmd: cmd, worker: null, t0: null, simTime: null,
             lastPose: null, lastPoseTime: null, speed: 0, poses: {}, value: null,
-            ackPending: false, pendingObs: null, lastAck: Date.now(), done: false };
+            ackPending: false, pendingObs: null, lastAck: Date.now(), done: false,
+            observing: false };
     logLines = [];
+    pendingActs.length = 0;
     showHud();
-    hudSub((cfg.description || '') + ' — initializing');
+    // HUD shows the run command (its output streams in right below) — the
+    // rule description already had its moment on the start card.
+    // HUD stays minimal: the big value + Stop. Short phase text only while
+    // preparing (cleared once observation starts); the command and its
+    // output live in the Evaluation terminal.
+    hudSub('initializing...');
     updateBtn();
 
     Promise.all([
@@ -269,20 +373,9 @@
       w.onerror = function (e) { abort('script_error', e.message || 'worker error'); };
       w.onmessage = onWorkerMsg;
       w.postMessage({ t: 'boot', config: cfg, route: run.route, origins: origins });
-      // 러너 기본 초기화 — 물체 원위치 + 차량을 출발선에 (respawn 없이)
-      var resets = Object.keys(origins).map(function (n) {
-        var o = origins[n];
-        return post('/models/' + encodeURIComponent(n) + '/pose', { x: o.x, y: o.y, yaw: o.yaw });
-      });
-      var wp = run.route.waypoints;
-      var yaw0 = Math.atan2(wp[1][1] - wp[0][1], wp[1][0] - wp[0][0]);
-      // 출발선(웨이포인트 0)보다 뒤에 배치 — 선 위에서 시작하면 첫 통과 감지가
-      // 지터에 따라 "즉시 시작/미감지"로 갈리는 비결정 버그가 생긴다. 뒤에서
-      // 출발해 차량 중심이 선을 넘는 순간이 곧 타이머 시작(통과 감지)이 된다.
-      var BACK = 0.35;   // m — 차체(~0.2m)가 선에 걸치지 않는 여유
-      resets.push(post('/pose', { x: wp[0][0] - Math.cos(yaw0) * BACK,
-                                  y: wp[0][1] - Math.sin(yaw0) * BACK, yaw: yaw0 }));
-      return Promise.all(resets);
+      // 시작 전 준비는 전부 스크립트 initialize()의 몫이다 — 러너는 아무것도
+      // 몰래 하지 않는다. 스크립트가 initialize 를 정의하지 않았을 때만 워커
+      // 프렐류드의 기본 준비(__defaultInit: 물체 원위치 + 차량 출발선 뒤)가 돈다.
     }).then(function () {
       if (!run) { return; }
       run.worker.postMessage({ t: 'initialize' });   // 교사 initialize → phase 응답에서 계속
@@ -297,8 +390,29 @@
     run.lastAck = Date.now();
     if (m.t === 'phase' && m.phase === 'initialized') {
       hudSub('starting...');
-      post('/evaluation/run', { command: run.cmd || undefined }).then(function () {
-        beginObservation();
+      // Barrier: drain initialize()'s relayed actions. The pose endpoints
+      // respond only after gz confirms the pose landed (completion semantics
+      // live in the API), so resolved acks mean the car and the objects are
+      // physically in place — no settle guessing needed.
+      var acts = pendingActs.slice();
+      pendingActs.length = 0;
+      Promise.all(acts).then(function () {
+        if (!run || run.done) { return; }
+        return requestTerminalRun(run.cmd).then(function (ok) {
+          if (!run || run.done) { return; }
+          if (ok === 'busy') { throw new Error('already running (Evaluation terminal)'); }
+          if (ok) {
+            run.terminalMode = true;
+            beginObservation();
+            return;
+          }
+          // cid binds the run to OUR SSE stream — the server rejects this with
+          // "already running" only when another live browser owns a run, and
+          // supersedes orphaned/ownerless ones by itself.
+          return post('/evaluation/run', { command: run.cmd || undefined, cid: CID }).then(function () {
+            beginObservation();
+          });
+        });
       }).catch(function (err) {
         abort('script_error', 'run command failed: ' + ((err && err.message) || err));
       });
@@ -317,16 +431,25 @@
   }
 
   var actionCount = 0, actionWin = Date.now();
+  // In-flight action POSTs — the initialized barrier drains this so the run
+  // never starts while initialize()'s teleports are still traveling. The
+  // pose endpoints confirm application before responding, so a resolved
+  // entry means the entity is physically in place.
+  var pendingActs = [];
   function doAction(name, args) {
     var now = Date.now();
     if (now - actionWin > 1000) { actionWin = now; actionCount = 0; }
     if (++actionCount > 10) { return; }   // 개입 rate cap — 폭주 스크립트 방어
-    if (name === 'teleport') { post('/pose', { x: args.x, y: args.y, yaw: args.yaw }); }
+    var p = null;
+    if (name === 'teleport') { p = post('/pose', { x: args.x, y: args.y, yaw: args.yaw }); }
     else if (name === 'moveObject') {
-      post('/models/' + encodeURIComponent(args.name) + '/pose', args.pose);
+      p = post('/models/' + encodeURIComponent(args.name) + '/pose', args.pose);
     } else if (name === 'setLight') {
-      post('/traffic_lights/' + encodeURIComponent(args.name), { state: args.state });
-    } else if (name === 'overlay') { post('/overlay', { text: args.text, ttl: 10 }); }
+      p = post('/traffic_lights/' + encodeURIComponent(args.name), { state: args.state });
+    } else if (name === 'overlay') { p = post('/overlay', { text: args.text, ttl: 10 }); }
+    // Track only pre-observation actions (initialize phase) — the barrier is
+    // the sole consumer; mid-run actions are covered by script-side latches.
+    if (p && run && !run.observing) { pendingActs.push(p.catch(function () {})); }
   }
 
   // gz.js Topic 은 unsubscribe 가 없다 — (월드·토픽)당 1회만 구독하고 캐시.
@@ -339,7 +462,8 @@
 
   function beginObservation() {
     if (!run || run.done) { return; }
-    hudSub(((evalDoc.config || {}).description || ''));
+    run.observing = true;
+    hudSub('');
     // gz 웹소켓 원본 구독 — 렌더 파이프라인과 독립 (지연 재생 안 탐)
     if (typeof Topic !== 'function' || !window.gz || !gz.socket || gz.socket.readyState !== 1) {
       abort('script_error', 'sim connection unavailable');
@@ -412,6 +536,9 @@
   function cleanup() {
     if (run.watchdog) { clearInterval(run.watchdog); }
     if (run.worker) { try { run.worker.terminate(); } catch (e) {} }
+    if (run.terminalMode) {
+      try { window.parent.postMessage({ type: 'physicar-eval-stop' }, '*'); } catch (e) {}
+    }
     fetch(API + '/evaluation/stop', { method: 'POST' }).catch(function () {});
     run.done = true;
     run = null;

@@ -107,6 +107,26 @@ body { background: #1a1a2e; color: #eee; font-family: sans-serif; overflow: hidd
 
 /* Traffic light control panel — 신호등 클릭 시 우측에 세로 신호등 표시.
    원격 신호등 앱과 동일 문법: 꺼진 불 클릭 = 전환, 노랑은 중앙 겹침(z2). */
+/* Object panel — same family as the light panel (bottom-right card) */
+#object-panel { display: none; position: fixed; bottom: calc(var(--u)*0.6); right: calc(var(--u)*0.6);
+                z-index: 20; background: rgba(20,20,40,0.92); border: 1px solid #555;
+                border-radius: calc(var(--u)*0.6); padding: calc(var(--u)*0.5);
+                width: calc(var(--u)*7.5); font-size: calc(var(--u)*0.8); color: #ccc; }
+#object-panel.show { display: block; }
+#object-panel .lp-head { display: flex; align-items: center; gap: calc(var(--u)*0.3);
+                         font-size: calc(var(--u)*0.8); margin-bottom: calc(var(--u)*0.4); color: #aaa; }
+#object-panel #op-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #eee; }
+#object-panel .lp-close { color: #888; cursor: pointer; font-size: calc(var(--u)*1.2); line-height: 1; }
+#object-panel .lp-close:hover { color: #fff; }
+.op-row { display: flex; justify-content: space-between; gap: calc(var(--u)*0.6);
+          padding: calc(var(--u)*0.1) 0; font-variant-numeric: tabular-nums; }
+.op-row span:first-child { color: #888; }
+#op-reset { width: 100%; margin-top: calc(var(--u)*0.4); background: #2a2a44; color: #eee;
+            border: 1px solid #555; border-radius: calc(var(--u)*0.3);
+            padding: calc(var(--u)*0.3) 0; cursor: pointer; font-size: calc(var(--u)*0.8); }
+#op-reset:hover { border-color: #7e57c2; color: #fff; }
+#op-reset:disabled { opacity: 0.5; cursor: wait; }
+
 #light-panel { display: none; position: fixed; bottom: calc(var(--u)*0.6); right: calc(var(--u)*0.6);
                z-index: 20; background: rgba(20,20,40,0.92); border: 1px solid #555;
                border-radius: calc(var(--u)*0.6); padding: calc(var(--u)*0.5);
@@ -192,6 +212,13 @@ body { background: #1a1a2e; color: #eee; font-family: sans-serif; overflow: hidd
                   opacity: 0; pointer-events: none; transition: opacity 0.3s;
                   max-width: 90%; text-align: center; font-variant-numeric: tabular-nums; }
 #status-overlay.show { opacity: 1; }
+/* Fresh-value pulse: every overlay POST (even identical text) restarts this
+   so repeated pushes — e.g. the same +5s penalty — visibly re-announce */
+#status-overlay.pulse { animation: overlay-pulse 0.5s ease-out; }
+@keyframes overlay-pulse {
+  0%   { transform: translateX(-50%) scale(1.12); background: rgba(126,87,194,0.85); }
+  100% { transform: translateX(-50%) scale(1);    background: rgba(0,0,0,0.55); }
+}
 
 /* First-visit mouse-controls hint: full-screen click target, fade in/out */
 #mouse-hint { position: fixed; inset: 0; z-index: 400; display: flex;

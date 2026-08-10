@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright 2026 AICASTLE Inc.
 
-import re, os, json, math, subprocess, glob, http.server, threading, time, signal, tempfile, shutil, logging
+import re, os, json, math, subprocess, glob, http.server, threading, time, signal, tempfile, shutil, logging, select
 
 logging.basicConfig(
     level=logging.INFO,
@@ -331,6 +331,13 @@ _RUN_LINE_MAX = 300     # 로그 한 줄 길이 상한
 _RUN_RATE_MAX = 30      # 스트림별 초당 로그 라인 상한 (초과분 드롭 + 요약 1줄)
 _run_lock = threading.Lock()
 _run_proc = None        # subprocess.Popen — 프로세스 그룹 리더 (bash -lc)
+# ── run 소유권 — SSE 연결에 바인딩 ──
+# 러너(브라우저)가 /events?cid=<id> 로 스트림을 열고 run 시작 시 같은 cid 를
+# 제출한다. 그 SSE 가 끊기면(탭 닫힘) run 은 고아 — 서버가 즉시 사살한다.
+# 폴링/하트비트 없음: 이미 열려 있는 스트림의 종료가 곧 신호다.
+_sse_lock = threading.Lock()
+_sse_clients = set()    # 살아있는 /events 연결의 cid 들
+_run_owner = None       # 활성 run 을 시작한 cid (None = 무소유 — API 직접 실행)
 _run_exit = None        # 마지막 종료 코드 (None = 미실행 또는 실행 중)
 _run_events = []        # [(seq, payload)] 링 — /events 의 event:run 프레임 소스
 _run_seq = 0
@@ -388,9 +395,10 @@ def _run_start(command, wall_limit):
 
     def watch():
         rc = proc.wait()
-        global _run_exit
+        global _run_exit, _run_owner
         with _run_lock:
             _run_exit = rc
+            _run_owner = None
         _run_emit({"phase": "exit", "exit_code": rc})
 
     def backstop():
@@ -410,7 +418,13 @@ def _run_start(command, wall_limit):
     return True
 
 def _run_kill(proc):
-    """프로세스 그룹 전체 SIGTERM → 3초 유예 → SIGKILL (자식 프로세스까지)."""
+    """프로세스 그룹 전체 SIGTERM → 3초 유예 → SIGKILL (자식 프로세스까지).
+
+    Blocks until the leader is confirmed dead (bounded ~4 s). The background
+    escalation it used before let /evaluation/stop return while the process
+    was still dying — an immediate re-start then raced _run_start's
+    already-running check and failed. Completion semantics instead: when the
+    stop response arrives, the process is gone (typical TERM death ~50 ms)."""
     try:
         pgid = os.getpgid(proc.pid)
     except Exception:
@@ -419,22 +433,46 @@ def _run_kill(proc):
         os.killpg(pgid, signal.SIGTERM)
     except Exception:
         pass
-
-    def force():
-        time.sleep(3)
-        if proc.poll() is None:
-            try:
-                os.killpg(pgid, signal.SIGKILL)
-            except Exception:
-                pass
-    threading.Thread(target=force, daemon=True).start()
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            return
+        time.sleep(0.05)
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except Exception:
+        pass
+    deadline = time.monotonic() + 1.0
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            return
+        time.sleep(0.05)
 
 def _run_stop():
     """멱등 중지 — 안 돌고 있어도 조용히 성공."""
+    global _run_owner
     with _run_lock:
         proc = _run_proc
+        _run_owner = None
     if proc is not None and proc.poll() is None:
         _run_kill(proc)
+
+def _orphan_check(cid):
+    """SSE 연결 종료 훅 — run 소유 브라우저가 끊겼으면 그 run 은 고아다.
+    러너(브라우저)가 평가의 두뇌라 verdict 이 나올 수 없고, 학생 프로세스만
+    차를 계속 몬다. 즉시 사살한다."""
+    global _run_owner
+    with _run_lock:
+        owner = _run_owner
+        proc = _run_proc
+    if not cid or owner != cid:
+        return
+    if proc is not None and proc.poll() is None:
+        logging.warning("evaluation owner %s disconnected - killing orphan run", cid)
+        _run_kill(proc)
+    with _run_lock:
+        if _run_owner == cid:
+            _run_owner = None
 
 # Single source of truth for simulation state
 _lock = threading.Lock()
@@ -610,6 +648,10 @@ _gz_stats_seen = [0.0]  # monotonic time of the last stats message — a world
 _overlay_text = ""      # free status text shown on the /sim screen
 _overlay_expiry = 0.0   # monotonic deadline — stale text disappears by
                         # itself when the posting script dies (POST /overlay)
+_overlay_seq = 0        # bumped on EVERY overlay POST — identical text would
+                        # otherwise be swallowed by the SSE snapshot diff, and
+                        # the viewer could not signal "a new value arrived"
+                        # (e.g. the same +5s penalty landing repeatedly)
 
 
 def _parse_pose_block(block):
@@ -1113,6 +1155,29 @@ def _pose_fields(x, y, z, yaw, pitch=0.0):
     return (f'position: {{x: {x:.6f}, y: {y:.6f}, z: {z:.6f}}}, '
             f'orientation: {{x: {qx:.6f}, y: {qy:.6f}, z: {qz:.6f}, w: {qw:.6f}}}')
 
+def _wait_pose_applied(name, x, y, yaw=None, timeout=2.0):
+    """Block until the live pose stream confirms the entity reached the
+    commanded pose. gz user commands are queued — an accepted request is not
+    yet an applied one — so the pose POST endpoints call this to give every
+    caller completion semantics from the HTTP response itself (no client-side
+    settle guessing). Returns False when not confirmed within the timeout
+    (e.g. physics immediately pushes the body away from the target)."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        with _gz_cache_lock:
+            p = dict(_gz_poses.get(name) or {})
+        if p:
+            dp = math.hypot(p.get("x", 1e9) - x, p.get("y", 1e9) - y)
+            ok = dp < 0.05
+            if ok and yaw is not None:
+                dyaw = math.atan2(math.sin(p.get("yaw", 0.0) - yaw),
+                                  math.cos(p.get("yaw", 0.0) - yaw))
+                ok = abs(dyaw) < 0.1
+            if ok:
+                return True
+        time.sleep(0.02)
+    return False
+
 def _set_entity_pose(world, name, x, y, z, yaw, pitch=0.0):
     if _gz_node is not None:
         try:
@@ -1343,6 +1408,10 @@ def _inplace_respawn(world):
     deadline = time.monotonic() + 5.0
     while time.monotonic() < deadline:
         if _entity_exists(world, VEHICLE_NAME):
+            # Existence = created; also wait for the pose stream to report the
+            # spawn pose so /pose readers see the new position the moment the
+            # respawn response lands (completion semantics, like the pose APIs).
+            _wait_pose_applied(VEHICLE_NAME, x, y)
             _scan_world_lights(world)
             logging.info("in-place respawn done for %s", world)
             return True
@@ -1642,7 +1711,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "time": clock.get("sim_time"), "paused": clock.get("paused", False),
                 "rtf": clock.get("rtf"),
                 "vehicle": vehicle, "objects": objects, "lights": lights,
-                "overlay": overlay, "brightness": bright,
+                "overlay": overlay, "overlay_seq": _overlay_seq,
+                "brightness": bright,
                 "run": _run_state(),
             })
         elif self.path == "/world":
@@ -1672,6 +1742,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             })
         elif self.path == "/worlds":
             worlds = sorted(glob.glob(os.path.join(WORLDS_DIR, "*.world")))
+
+            def _dim(v):
+                r = round(v, 1)
+                return int(r) if float(r).is_integer() else r
+
             items = []
             for w in worlds:
                 name = os.path.splitext(os.path.basename(w))[0]
@@ -1679,11 +1754,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 # else ships with the sim and counts as official.
                 pub = _pub_sidecar(name)
                 custom = name.startswith("custom_")
+                size = (pub or {}).get("size")
+                if not size:
+                    # Official (and legacy-installed) worlds carry no publish
+                    # sidecar — derive the footprint from the track collision
+                    # bounds instead (cached per world).
+                    b = _get_track_bounds(name)
+                    if b:
+                        size = [_dim(b["maxX"] - b["minX"]), _dim(b["maxY"] - b["minY"])]
                 items.append({"name": name, "file": os.path.basename(w),
                               "display": (pub or {}).get("name")
                                          or OFFICIAL_WORLD_NAMES.get(name) or name,
                               "world_id": (pub or {}).get("world_id"),
-                              "size": (pub or {}).get("size"),
+                              "size": size,
                               "official": not custom,
                               "evaluation": os.path.isfile(_eval_sidecar_path(name)),
                               "deletable": custom and name not in PROTECTED_NAMES})
@@ -1692,13 +1775,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
             with _lock:
                 current = _current_world
             self._json(200, {"worlds": items, "current": current})
-        elif self.path == "/events":
+        elif self.path == "/events" or self.path.startswith("/events?"):
             # SSE: push a status snapshot whenever it changes, so clients
             # (e.g. the app.physicar world select) need no polling.
             # 프레임에는 이름표(event:)가 붙는다 — 'state' = 전체 상태 스냅샷,
             # 'run' = 학생 프로세스 이벤트(start/log/exit). 모르는 이벤트 이름은
             # 무시가 계약 (addEventListener 기반 소비자는 자동으로 그렇게 된다).
             # 새 종류는 항상 새 event 이름으로 추가한다 — state 키 확장 금지.
+            # ?cid=<id> 를 붙인 연결은 run 소유권 후보로 등록된다 (없으면 익명).
+            m_cid = re.search(r'[?&]cid=([\w-]{4,64})', self.path)
+            cid = m_cid.group(1) if m_cid else None
+            if cid:
+                with _sse_lock:
+                    _sse_clients.add(cid)
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-cache")
@@ -1726,6 +1815,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                             "switching": _switching,
                             # 뷰어가 폴링하지 않도록 여기서 푸시 (변경 시에만 전송됨)
                             "overlay": _overlay_text if time.monotonic() < _overlay_expiry else "",
+                            "overlay_seq": _overlay_seq,
                             "brightness": _brightness,
                             # 신호등 상태 — 마지막 남은 클라 폴링(/traffic_lights 주기
                             # 조회)을 없애기 위해 스냅샷에 포함 (변경 시에만 전송)
@@ -1747,10 +1837,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         self.wfile.write(b": keep-alive\n\n")   # comment ping
                         self.wfile.flush()
                         last_beat = time.monotonic()
+                    # 연결 생존 확인 — EventSource 는 데이터를 보내지 않으므로
+                    # "읽을 것이 생겼다" = FIN(닫힘)이다. select 0-timeout 이라
+                    # 무비용이고, 탭이 닫히면 ≤0.25s 안에 감지된다 (keep-alive
+                    # 쓰기 시점(15s)까지 기다리지 않는다 — 고아 run 즉시 사살용).
+                    try:
+                        readable, _w, _x = select.select([self.connection], [], [], 0)
+                        if readable and not self.connection.recv(4096):
+                            break
+                    except Exception:
+                        break
                     # 0.25s — run 로그의 체감 실시간성 (state 스냅샷 비교는 값싸다)
                     time.sleep(0.25)
             except (BrokenPipeError, ConnectionResetError):
-                return
+                pass
+            finally:
+                if cid:
+                    with _sse_lock:
+                        _sse_clients.discard(cid)
+                    _orphan_check(cid)
+            return
         elif self.path == "/status":
             with _lock:
                 proc = _sim_proc
@@ -1849,11 +1955,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         global _sim_proc, _current_world, _launch_proc, _fail_count, \
-            _overlay_text, _overlay_expiry
+            _overlay_text, _overlay_expiry, _overlay_seq, _run_owner
         if self.path == "/overlay":
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length)) if length else {}
             _overlay_text = str(body.get("text", ""))[:300]
+            _overlay_seq += 1
             try:
                 ttl = min(max(float(body.get("ttl", 10)), 1.0), 3600.0)
             except (TypeError, ValueError):
@@ -1954,9 +2061,27 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not isinstance(tl, (int, float)) or not (10 <= tl <= 3600):
                 self._json(400, {"error": "time_limit_s must be 10-3600"})
                 return
+            rcid = body.get("cid")
+            rcid = rcid if isinstance(rcid, str) and re.match(r'^[\w-]{4,64}$', rcid) else None
+            # 소유권 중재: 활성 run 의 소유 SSE 가 살아 있으면 거부(다른 브라우저의
+            # 이중 실행 방지). 소유자가 끊겼거나 무소유(API 직접 실행)면 고아로
+            # 간주하고 대체한다 — 러너 없는 run 은 존재할 이유가 없다.
+            with _run_lock:
+                cur_proc = _run_proc
+                cur_owner = _run_owner
+            if cur_proc is not None and cur_proc.poll() is None:
+                with _sse_lock:
+                    owner_alive = cur_owner in _sse_clients if cur_owner else False
+                if owner_alive:
+                    self._json(409, {"error": "already running"})
+                    return
+                logging.warning("superseding ownerless evaluation run (owner=%s)", cur_owner)
+                _run_kill(cur_proc)
             if not _run_start(command.strip(), wall_limit=tl * 2 + 30):
                 self._json(409, {"error": "already running"})
                 return
+            with _run_lock:
+                _run_owner = rcid
             _run_emit({"phase": "start", "command": command.strip()})
             logging.info("evaluation run started: %s", command.strip()[:120])
             self._json(200, {"ok": True})
@@ -1997,8 +2122,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not _set_entity_pose(world, VEHICLE_NAME, x, y, 0.05, yaw):
                 self._json(500, {"error": "pose change failed"})
                 return
-            logging.info("vehicle teleported to (%.2f, %.2f, yaw %.2f)", x, y, yaw)
-            self._json(200, {"ok": True, "pose": {"x": round(x, 6), "y": round(y, 6), "z": 0.05, "yaw": round(yaw, 6)}})
+            # Completion semantics: respond only after the live pose stream
+            # confirms the teleport landed (callers need no settle logic).
+            applied = _wait_pose_applied(VEHICLE_NAME, x, y, yaw)
+            logging.info("vehicle teleported to (%.2f, %.2f, yaw %.2f) applied=%s", x, y, yaw, applied)
+            self._json(200, {"ok": True, "applied": applied,
+                             "pose": {"x": round(x, 6), "y": round(y, 6), "z": 0.05, "yaw": round(yaw, 6)}})
         elif re.match(r'^/models/[\w]+/pose$', self.path):
             # 월드 물체 텔레포트 (Custom World Builder 오브젝트·신호등).
             # 생략된 좌표는 현재 포즈(비정적=실시간, 정적=SDF 원점) 유지. 회전은 yaw만
@@ -2049,16 +2178,28 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if not ok:
                     self._json(404 if err == "light not found" else 500, {"error": err})
                     return
-                logging.info("light moved: %s to (%.2f, %.2f, yaw %.2f)", name, x, y, yaw)
-                self._json(200, {"ok": True, "model": {"name": name, "x": sig["x"], "y": sig["y"], "z": 0.0, "yaw": sig["yaw"], "type": "light"}})
+                # Same completion semantics as every other pose write
+                applied = _wait_pose_applied(name, x, y, yaw)
+                logging.info("light moved: %s to (%.2f, %.2f, yaw %.2f) applied=%s",
+                             name, x, y, yaw, applied)
+                self._json(200, {"ok": True, "applied": applied,
+                                 "model": {"name": name, "x": sig["x"], "y": sig["y"],
+                                           "z": 0.0, "yaw": sig["yaw"], "type": "light"}})
                 return
             if not _set_entity_pose(world, name, x, y, z, yaw):
                 self._json(500, {"error": "pose change failed"})
                 return
-            logging.info("model moved: %s to (%.2f, %.2f, %.2f, yaw %.2f)", name, x, y, z, yaw)
-            self._json(200, {"ok": True, "model": {"name": name, "x": round(x, 6), "y": round(y, 6),
-                                                   "z": round(z, 6), "yaw": round(yaw, 6),
-                                                   "type": item.get("type", "model")}})
+            # Completion semantics — but only trackable (dynamic) entities show
+            # up in the dynamic_pose stream; static ones cannot be confirmed.
+            with _gz_cache_lock:
+                tracked = name in _gz_poses
+            applied = _wait_pose_applied(name, x, y, yaw) if tracked else None
+            logging.info("model moved: %s to (%.2f, %.2f, %.2f, yaw %.2f) applied=%s",
+                         name, x, y, z, yaw, applied)
+            self._json(200, {"ok": True, "applied": applied,
+                             "model": {"name": name, "x": round(x, 6), "y": round(y, 6),
+                                       "z": round(z, 6), "yaw": round(yaw, 6),
+                                       "type": item.get("type", "model")}})
         elif self.path == "/stop":
             _kill_all_gz()
             with _lock:

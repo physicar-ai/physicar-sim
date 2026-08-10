@@ -212,8 +212,10 @@ var GzInteract = (function() {
       rotRing.position.set(
         obj.position.x - Math.sin(yaw) * off,
         obj.position.y + Math.cos(yaw) * off, 0.03);
-      // 멀리서도 핸들이 화면상 일정 크기를 유지 (기준 wpp ≈ 0.0036 = WB 기본 카메라)
-      var s = Math.max(1, wpp / 0.0036);
+      // 핸들은 줌과 무관하게 화면상 일정 크기 (기준 wpp ≈ 0.0036 = WB 기본
+      // 카메라). 예전의 min-clamp(월드 크기 하한)는 줌인 시 핸들이 물체만큼
+      // 커 보이게 만들었다 — 상수 0.7로 전체 크기도 한 단계 줄임.
+      var s = wpp / 0.0036 * 0.7;
       rotRing.scale.set(s, s, s);
       rotRing.visible = true;
     }

@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <title>Gazebo Web</title>
-  <link rel="stylesheet" href="assets/css/gzweb.css?v=14" id="pc-css">
+  <link rel="stylesheet" href="assets/css/gzweb.css?v=17" id="pc-css">
   <script>
   // 정적 자산 로더 — 배포 태그가 R2 에 있으면 worlds.physicar.ai(엣지 캐시)에서,
   // 아니면 로컬(EC2)에서. worldpub: DEV 모드·태그 밖·더티 트리는 assets_rev 가
@@ -15,9 +15,9 @@
       'assets/lib/gz.js?v=2',
       'assets/lib/gz3d.js?v=2',
       'assets/js/gz-scene.js?v=4',
-      'assets/js/gz-interact.js?v=3',
-      'assets/js/gzweb.js?v=57',
-      'assets/js/evaluation.js?v=2'
+      'assets/js/gz-interact.js?v=4',
+      'assets/js/gzweb.js?v=64',
+      'assets/js/evaluation.js?v=18'
     ];
     var ready = { dom: document.readyState !== 'loading', js: false };
     function maybeInit() {
@@ -77,6 +77,19 @@
   </div>
   </div><!-- /#toolbar -->
   <div id="pose-panel"></div>
+  <!-- Object panel: selecting a movable world object shows its live pose and
+       a one-click reset to its published origin (also stands fallen objects up) -->
+  <div id="object-panel">
+    <div class="lp-head"><span id="op-name"></span>
+      <span class="lp-close" onclick="gzInteract && gzInteract.deselect()">&times;</span></div>
+    <div class="op-rows">
+      <div class="op-row"><span>x</span><span id="op-x">&ndash;</span></div>
+      <div class="op-row"><span>y</span><span id="op-y">&ndash;</span></div>
+      <div class="op-row"><span>yaw</span><span id="op-yaw">&ndash;</span></div>
+      <div class="op-row"><span>origin</span><span id="op-origin">&ndash;</span></div>
+    </div>
+    <button id="op-reset" onclick="resetObjectToOrigin()">&#x21bb; Reset</button>
+  </div>
   <div id="light-panel">
     <div class="lp-head"><span id="lp-name"></span>
       <span class="lp-close" onclick="gzInteract && gzInteract.deselect()">&times;</span></div>

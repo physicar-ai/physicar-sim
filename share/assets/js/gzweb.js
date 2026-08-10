@@ -94,13 +94,15 @@ function _applyOverlayText(text) {
 (function _startPcEvents() {
   var es;
   try { es = new EventSource('/sim/api/events'); } catch (e) { return; }
-  es.onmessage = function (ev) {
+  // SSE 는 이름표 있는 이벤트(event: state / run / ...)로 온다 — 아는 이름만
+  // 구독하고 모르는 이름은 무시가 계약 (addEventListener 가 자동으로 보장)
+  es.addEventListener('state', function (ev) {
     var d;
     try { d = JSON.parse(ev.data); } catch (e) { return; }
     if (typeof d.overlay === 'string') { _applyOverlayText(d.overlay); }
     if (typeof d.brightness === 'number') { _applyRemoteBrightness(d.brightness); }
     if (Array.isArray(d.lights)) { _applyLightsSnapshot(d.lights); }
-  };
+  });
 })();
 
 // =====================================================================
@@ -368,6 +370,9 @@ function connect() {
         messageType: "gz.msgs.Pose_V",
         callback: function(msg) {
           var needRefresh = false;
+          // One restamped tick per message — packets bursting in after a
+          // page/network stall get their real spacing back (see _stampPoseTick)
+          var st = _stampPoseTick();
           for (var j = 0; j < msg.pose.length; ++j) {
             var p = msg.pose[j];
             var e = scene.getByName(p.name);
@@ -375,7 +380,7 @@ function connect() {
               // Buffer the timestamped pose; _applyPoseLerp() plays the
               // stream back _POSE_DELAY_MS in the past with linear
               // interpolation between packets (constant velocity, no jumps).
-              _pushPoseSample(p.name, p.position || {}, p.orientation || {});
+              _pushPoseSample(p.name, p.position || {}, p.orientation || {}, st);
             } else if (!knownModels[p.name] && p.name !== currentWorld) {
               needRefresh = true;
             }
@@ -523,7 +528,26 @@ function init() {
       });
     } catch (e) { /* 방어적 */ }
   }
-  function _groundUpkeep() { applyDecalLift(); applyTextureAniso(); applyViewerBrightness(); }
+  // 로드에 실패한 텍스처(image undefined) 정리 — 방치하면 렌더러가 매 프레임
+  // "Texture marked for update but image is undefined" 를 찍어 콘솔을 플러딩한다.
+  // 15초의 로딩 유예 후에도 이미지가 없으면 맵을 떼고 단색으로 렌더.
+  function _dropDeadTextures() {
+    var now = Date.now();
+    scene.scene.traverse(function(o) {
+      if (!o.material) { return; }
+      var mats = Array.isArray(o.material) ? o.material : [o.material];
+      mats.forEach(function(m) {
+        if (!m.map) { return; }
+        if (m.map.image) { m.map.__pcFirstSeen = 0; return; }
+        if (!m.map.__pcFirstSeen) { m.map.__pcFirstSeen = now; return; }
+        if (now - m.map.__pcFirstSeen > 15000) {
+          m.map = null;
+          m.needsUpdate = true;
+        }
+      });
+    });
+  }
+  function _groundUpkeep() { applyDecalLift(); applyTextureAniso(); applyViewerBrightness(); _dropDeadTextures(); }
   setTimeout(_groundUpkeep, 3000);
   setInterval(_groundUpkeep, 5000);
   cam.position.x = 0; cam.position.y = -1.2; cam.position.z = 0.6;
@@ -629,7 +653,6 @@ function setControlsEnabled(enabled) {
   _controlsEnabled = enabled;
   var chip = document.getElementById("world-chip");
   if (enabled) { chip.classList.remove("disabled"); } else { chip.classList.add("disabled"); }
-  document.getElementById("wm-import-btn").disabled = !enabled;
 }
 
 function openWorldModal() {
@@ -641,7 +664,6 @@ function openWorldModal() {
 function closeWorldModal() {
   document.getElementById("world-modal-overlay").classList.remove("open");
   document.getElementById("world-modal").classList.remove("open");
-  document.getElementById("file-input").value = "";
   renderWorldLists();   // collapse any pending inline delete confirm
 }
 
@@ -649,48 +671,6 @@ function _wmStatus(msg, cls) {
   var el = document.getElementById("wm-status");
   el.textContent = msg || "";
   el.className = cls || "";
-}
-
-// Inline overwrite confirm (webviews drop native confirm()). The upload
-// session is held server-side: Replace re-completes it with overwrite,
-// Cancel discards it — either way no second upload.
-function _wmOverwriteConfirm(world, uploadId) {
-  var el = document.getElementById("wm-status");
-  el.className = "";
-  el.textContent = "";
-  var span = document.createElement("span");
-  span.textContent = "World \"" + world + "\" already exists. Replace it?";
-  var rep = document.createElement("button");
-  rep.className = "wm-ow danger";
-  rep.textContent = "Replace";
-  var can = document.createElement("button");
-  can.className = "wm-ow";
-  can.textContent = "Cancel";
-  el.appendChild(span); el.appendChild(rep); el.appendChild(can);
-  rep.onclick = function () {
-    _wmStatus("Processing...", "");
-    fetch("/sim/api/upload/complete", {
-      method: "POST",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({upload_id: uploadId, overwrite: true})
-    })
-    .then(function (r) { return r.json(); })
-    .then(function (res) {
-      if (!res.ok) throw new Error(res.error || "Upload failed");
-      _wmStatus("World \"" + res.world + "\" replaced!", "success");
-      loadWorlds(res.world);
-      setTimeout(function () { closeWorldModal(); switchWorld(res.world + ".world"); }, 1500);
-    })
-    .catch(function (e) { _wmStatus("Upload failed: " + e.message, "error"); });
-  };
-  can.onclick = function () {
-    fetch("/sim/api/upload/cancel", {
-      method: "POST",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({upload_id: uploadId})
-    }).catch(function () {});
-    _wmStatus("Import cancelled.", "");
-  };
 }
 
 function renderWorldLists() {
@@ -704,8 +684,16 @@ function renderWorldLists() {
     row.className = "wm-row" + (isCurrent ? " active" : "");
     var label = document.createElement("span");
     label.className = "wm-name";
-    label.textContent = (isCurrent ? "\u2713 " : "") + w.name;
+    label.textContent = (isCurrent ? "\u2713 " : "") + (w.display || w.name);
     row.appendChild(label);
+    var idText = w.world_id ? w.world_id.slice(0, 8) : w.name;
+    if (w.display && w.display !== w.name || w.world_id) {
+      var idTag = document.createElement("span");
+      idTag.className = "wm-idtag";
+      idTag.textContent = idText;
+      idTag.title = w.world_id || w.name;
+      row.appendChild(idTag);
+    }
     row.onclick = function() { if (!isCurrent) switchWorld(w.file); };
     if (w.deletable) {
       var del = document.createElement("span");
@@ -732,12 +720,13 @@ function renderWorldLists() {
       };
       row.appendChild(del);
     }
-    (w.name.indexOf("custom_") === 0 ? custom : official).appendChild(row);
+    var isCustom = w.official !== undefined ? !w.official : w.name.indexOf("custom_") === 0;
+    (isCustom ? custom : official).appendChild(row);
   });
   if (!custom.children.length) {
     var empty = document.createElement("div");
     empty.className = "wm-empty";
-    empty.textContent = "No custom worlds yet — import one below.";
+    empty.textContent = "No custom worlds installed yet.";
     custom.appendChild(empty);
   }
 }
@@ -747,7 +736,12 @@ function loadWorlds(selectWorld) {
   fetch("/sim/api/worlds").then(function(r){return r.json()}).then(function(data) {
     worldsData = data.worlds;
     currentWorld = selectWorld || data.current;
-    document.getElementById("world-chip").textContent = currentWorld || "...";
+    var curRow = null;
+    for (var i = 0; i < worldsData.length; i++) {
+      if (worldsData[i].name === currentWorld) { curRow = worldsData[i]; break; }
+    }
+    document.getElementById("world-chip").textContent =
+      (curRow && (curRow.display || curRow.name)) || currentWorld || "...";
     renderWorldLists();
     setControlsEnabled(true);
   }).catch(function() { setTimeout(function(){ loadWorlds(); }, 3000); });
@@ -773,165 +767,49 @@ function deleteWorld(name) {
     }).catch(function() { _wmStatus("Delete failed", "error"); setControlsEnabled(true); });
 }
 
-// Drag & drop — 모달 없이도 화면 어디에나 .tar.gz를 떨어뜨리면 업로드
-window.addEventListener("load", function() {
-  ["dragenter", "dragover"].forEach(function(e) {
-    window.addEventListener(e, function(ev) { ev.preventDefault(); }, false);
-  });
-  window.addEventListener("drop", function(ev) {
-    ev.preventDefault();
-    var files = ev.dataTransfer && ev.dataTransfer.files;
-    if (files && files.length > 0) handleFile(files[0]);
-  }, false);
-});
-
-function handleFile(file) {
-  if (!file) return;
-  // Reset the picker so cancelling and re-choosing the same file re-fires change
-  var fi = document.getElementById("file-input");
-  if (fi) fi.value = "";
-  openWorldModal(); // progress shows in the modal footer (drag&drop path too)
-  var statusEl = document.getElementById("wm-status");
-  if (!file.name.endsWith(".tar.gz")) {
-    statusEl.textContent = "File must be .tar.gz";
-    statusEl.className = "error";
-    return;
-  }
-  statusEl.textContent = "Uploading " + file.name + "...";
-  statusEl.className = "";
-  
-  // Chunked upload for Codespaces proxy limit (10MB)
-  var CHUNK_SIZE = 10 * 1024 * 1024;
-  var uploadId = null;
-  
-  function cleanup() {
-    if (uploadId) {
-      fetch("/sim/api/upload/cancel", {
-        method: "POST",
-        headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({upload_id: uploadId})
-      }).catch(function() {});
-    }
-  }
-  
-  // Initialize upload
-  fetch("/sim/api/upload/init", {
-    method: "POST",
-    headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({filename: file.name, size: file.size})
-  })
-  .then(function(r) { return r.json(); })
-  .then(function(init) {
-    if (!init.ok) throw new Error(init.error || "Init failed");
-    uploadId = init.upload_id;
-    
-    // Split file into chunks and upload in parallel
-    var totalChunks = Math.ceil(file.size / CHUNK_SIZE);
-    var promises = [];
-    
-    for (var i = 0; i < totalChunks; i++) {
-      (function(chunkIndex) {
-        var start = chunkIndex * CHUNK_SIZE;
-        var end = Math.min(start + CHUNK_SIZE, file.size);
-        var blob = file.slice(start, end);
-        
-        var p = new Promise(function(resolve, reject) {
-          var reader = new FileReader();
-          reader.onload = function() {
-            var base64 = btoa(new Uint8Array(reader.result).reduce(function(data, byte) {
-              return data + String.fromCharCode(byte);
-            }, ''));
-            fetch("/sim/api/upload/chunk", {
-              method: "POST",
-              headers: {"Content-Type": "application/json"},
-              body: JSON.stringify({upload_id: uploadId, chunk_index: chunkIndex, data: base64})
-            })
-            .then(function(r) { return r.json(); })
-            .then(function(d) {
-              if (d.ok) {
-                var pct = Math.round((chunkIndex + 1) / totalChunks * 100);
-                statusEl.textContent = "Uploading " + file.name + "... " + pct + "%";
-                resolve();
-              } else {
-                reject(new Error(d.error || "Chunk upload failed"));
-              }
-            })
-            .catch(reject);
-          };
-          reader.onerror = reject;
-          reader.readAsArrayBuffer(blob);
-        });
-        promises.push(p);
-      })(i);
-    }
-    
-    return Promise.all(promises);
-  })
-  .then(function() {
-    statusEl.textContent = "Processing...";
-    return fetch("/sim/api/upload/complete", {
-      method: "POST",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({upload_id: uploadId})
-    });
-  })
-  .then(function(r) { return r.json(); })
-  .then(function(res) {
-    if (res.ok) {
-      statusEl.textContent = "World \"" + res.world + "\" uploaded!";
-      statusEl.className = "success";
-      var uploadedWorld = res.world;
-      loadWorlds(uploadedWorld);
-      setTimeout(function() { closeWorldModal(); switchWorld(uploadedWorld + ".world"); }, 1500);
-    } else if (res.error === "exists") {
-      // Server kept the upload session — ask before replacing, no re-upload
-      var keptId = uploadId;
-      uploadId = null;   // a later cleanup() must not cancel the kept session
-      _wmOverwriteConfirm(res.world, keptId);
-    } else {
-      throw new Error(res.error || "Upload failed");
-    }
-  })
-  .catch(function(e) {
-    statusEl.textContent = "Upload failed: " + e.message;
-    statusEl.className = "error";
-    cleanup();
-  });
+// gz 재시작을 기다렸다가 제자리 재접속 — 예전의 "2초 대기 + 풀 리로드"는
+// 부트스트랩을 전부 다시 밟느라 전환이 카메라보다 수 초 늦었고,
+// switch 시점 프리페치(메모리)도 페이지와 함께 사라졌다. 씬은 ws
+// 재연결로 새로 그려진다 (connection 핸들러가 월드 목록·CDN 매핑
+// 갱신). 재시작 직후 소켓은 간혹 행에 걸리므로, 접속이 붙을 때까지
+// 매 틱 재시도한다 (백오프 수십 초에 맡기지 않는다).
+function _pollWorldReady(targetWorld) {
+  var attempts = 0;
+  var poll = setInterval(function() {
+    attempts++;
+    fetch("/sim/api/status").then(function(r){return r.json()}).then(function(d) {
+      if (d.running && d.websocket && d.current === targetWorld) {
+        if (connected) { clearInterval(poll); return; }
+        if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+        reconnectDelay = 500;
+        connect();
+      } else if (attempts > 60) {
+        clearInterval(poll);
+        location.reload();   // 최후 수단 — 전환이 완전히 꼬였을 때만
+      }
+    }).catch(function() {});
+  }, 1000);
 }
 
 function switchWorld(worldFile) {
   setControlsEnabled(false);
   _prefetchSwitchTarget(worldFile);   // gz 재시작(수 초)과 다운로드를 겹친다
   var targetWorld = worldFile.replace(/\.world$/, "");
-  document.getElementById("world-chip").textContent = targetWorld;
+  var row = null;
+  for (var i = 0; i < (worldsData || []).length; i++) {
+    if (worldsData[i].file === worldFile) { row = worldsData[i]; break; }
+  }
+  document.getElementById("world-chip").textContent =
+    (row && (row.display || row.name)) || targetWorld;
   closeWorldModal();
   document.getElementById("respawn-btn").disabled = true;
   fetch("/sim/api/switch", {
     method: "POST",
     headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({world: worldFile})
+    // 배포 월드는 world_id 로 스위치 (파일명은 내장 월드용)
+    body: JSON.stringify(row && row.world_id ? {world_id: row.world_id} : {world: worldFile})
   }).then(function() {
-    var attempts = 0;
-    var poll = setInterval(function() {
-      attempts++;
-      fetch("/sim/api/status").then(function(r){return r.json()}).then(function(d) {
-        if (d.running && d.websocket && d.current === targetWorld) {
-          // 페이지 리로드 없이 제자리 재접속 — 예전의 "2초 대기 + 풀 리로드"는
-          // 부트스트랩을 전부 다시 밟느라 전환이 카메라보다 수 초 늦었고,
-          // switch 시점 프리페치(메모리)도 페이지와 함께 사라졌다. 씬은 ws
-          // 재연결로 새로 그려진다 (connection 핸들러가 월드 목록·CDN 매핑
-          // 갱신). 재시작 직후 소켓은 간혹 행에 걸리므로, 접속이 붙을 때까지
-          // 매 틱 재시도한다 (백오프 수십 초에 맡기지 않는다).
-          if (connected) { clearInterval(poll); return; }
-          if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
-          reconnectDelay = 500;
-          connect();
-        } else if (attempts > 60) {
-          clearInterval(poll);
-          location.reload();   // 최후 수단 — 전환이 완전히 꼬였을 때만
-        }
-      }).catch(function() {});
-    }, 1000);
+    _pollWorldReady(targetWorld);
   }).catch(function() {
     setControlsEnabled(true);
     document.getElementById("respawn-btn").classList.remove("busy");
@@ -995,18 +873,55 @@ var _POSE_DELAY_MS = 100;  // render this far in the past, linearly interpolatin
                            // playback masks the packet rate completely; exponential
                            // chasing (tried first) ripples at the packet frequency.
 
-function _pushPoseSample(name, pos, ori) {
+// Jitter-buffer restamp for pose packets. When the page or the network
+// stalls (browser jank, tunnel hiccup), the packets buffered during the
+// stall all ARRIVE within a few milliseconds. Stamping them with their
+// arrival time would compress hundreds of ms of motion into a ~0 ms
+// timeline span — playback then interpolates across near-identical
+// timestamps, whipping back and forth between neighboring samples (the
+// "left-right twitch" seen after every freeze). Normal-cadence packets
+// keep their arrival time (the original, proven-smooth path); only burst
+// members are re-spaced — spread FORWARD at ~3x the stream rate so the
+// playback glides once, briskly and smoothly, through the backlog.
+var _poseTick = { p: 50, last: 0, t: 0 };
+function _stampPoseTick() {
+  var now = performance.now();
+  var gap = now - _poseTick.last;
+  _poseTick.last = now;
+  var t;
+  if (gap > 15) {
+    // Normal cadence: trust the arrival clock — identical to the original
+    // behavior, which renders smoothly. Learn the stream period from these
+    // gaps only (burst gaps of ~0 ms must not drag the estimate down).
+    if (gap < 150) { _poseTick.p += (gap - _poseTick.p) * 0.05; }
+    // max() only unwinds a just-finished burst spread that overshot "now":
+    // stamps then advance 8 ms per packet until real time catches up.
+    t = Math.max(now, _poseTick.t + 8);
+  } else {
+    // Burst member — packets released together after a page/network stall.
+    // Spread them FORWARD at ~3x the stream rate: playback glides briskly
+    // and smoothly through the backlog instead of whipping through a
+    // zero-width timeline. Capped so an extreme stall cannot push stamps
+    // far into the future.
+    t = Math.min(_poseTick.t + Math.max(5, _poseTick.p / 3), now + 400);
+  }
+  _poseTick.t = t;
+  return t;
+}
+
+function _pushPoseSample(name, pos, ori, stamp) {
   var q = new THREE.Quaternion(ori.x || 0, ori.y || 0, ori.z || 0,
                                ori.w !== undefined ? ori.w : 1);
-  var s = { t: performance.now(),
+  var s = { t: stamp !== undefined ? stamp : performance.now(),
             x: pos.x || 0, y: pos.y || 0, z: pos.z || 0, q: q };
   var buf = _poseLerp[name];
   if (!buf) { _poseLerp[name] = [s]; return; }
   var last = buf[buf.length - 1];
+  if (s.t <= last.t) { s.t = last.t + 0.1; }   // keep per-name monotonicity
   var dx = s.x - last.x, dy = s.y - last.y, dz = s.z - last.z;
   if (dx * dx + dy * dy + dz * dz > 4) buf.length = 0;  // teleport: snap, don't glide
   buf.push(s);
-  if (buf.length > 12) buf.shift();
+  if (buf.length > 30) buf.shift();   // ~1.2 s at the usual stream rate
 }
 
 function _applyPoseLerp() {
@@ -1751,9 +1666,27 @@ function doRespawn() {
   if (btn.disabled || btn.classList.contains('busy')) return;
   if (!currentWorld) { _showToast('No track loaded', 4000); return; }
   btn.classList.add('busy');
-  // Re-select the current track: reloads the whole world so all built-in
-  // objects (vehicle, obstacles, etc.) return to their original positions.
-  switchWorld(currentWorld + '.world');
+  // In-place respawn on the server (world reset + vehicle re-create, ~1 s):
+  // the scene and the ws stay connected — objects glide back to their start
+  // poses via the pose stream, no reload. The server answers inplace:false
+  // when it had to fall back to the old full world reload; then wait for the
+  // restart like a world switch does.
+  fetch("/sim/api/respawn", { method: "POST" })
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (d && d.ok && d.inplace) {
+        btn.classList.remove('busy');
+      } else if (d && d.ok) {
+        _pollWorldReady(currentWorld);   // connection 핸들러가 busy 를 치운다
+      } else {
+        btn.classList.remove('busy');
+        _showToast((d && d.error) || 'Respawn failed', 4000);
+      }
+    })
+    .catch(function() {
+      btn.classList.remove('busy');
+      _showToast('Respawn failed', 4000);
+    });
 }
 
 function _afMouseDown(e) {
@@ -1849,6 +1782,7 @@ function toggleAutoFollow(on, initial) {
   }
 }
 
+var _afLastMs = 0;
 function _updateAutoFollow() {
   if (!_autoFollow) return;
   if (gzInteract && gzInteract.isManipulating('physicar')) return;
@@ -1856,9 +1790,20 @@ function _updateAutoFollow() {
   if (!obj) return;
   var target = new THREE.Vector3();
   obj.getWorldPosition(target);
+  // TIME-based smoothing factors. Per-frame constants (the original 0.08 /
+  // 0.15) made the smoothing lag proportional to frame time — when the
+  // browser hitches, rAF intervals fluctuate and the heading lag breathes
+  // with them, visibly rocking the camera around the car during a steady
+  // turn. With k = 1 - exp(-dt/tau) the lag is a constant angle for a given
+  // yaw rate no matter the frame rate: the chase view stays rigid.
+  var nowMs = performance.now();
+  var dt = _afLastMs ? Math.min((nowMs - _afLastMs) / 1000, 0.5) : 0.016;
+  _afLastMs = nowMs;
+  var kYaw = 1 - Math.exp(-dt / 0.15);
+  var kZoom = 1 - Math.exp(-dt / 0.11);
   // Smooth zoom interpolation
   if (typeof _af.radiusTarget !== 'undefined') {
-    _af.radius += (_af.radiusTarget - _af.radius) * 0.15;
+    _af.radius += (_af.radiusTarget - _af.radius) * kZoom;
     if (Math.abs(_af.radius - _af.radiusTarget) < 0.001) _af.radius = _af.radiusTarget;
   }
   // Track the vehicle heading with smoothing (shortest angular path) so the
@@ -1867,7 +1812,7 @@ function _updateAutoFollow() {
   var vyaw = _getVehicleYaw(obj);
   if (_af.yaw === null) _af.yaw = vyaw;
   var dyaw = Math.atan2(Math.sin(vyaw - _af.yaw), Math.cos(vyaw - _af.yaw));
-  _af.yaw += dyaw * 0.08;
+  _af.yaw += dyaw * kYaw;
   var th = _af.theta - _af.yaw;
   // Spherical to Cartesian offset (z-up)
   var sp = Math.sin(_af.phi);
@@ -2412,13 +2357,44 @@ var gzScene = GzScene.create({
     return "/sim/meshes/" + p;
   },
   loadMesh: function(url, onLoad, onError) {
+    // 배포 월드 CDN 실패(배포 삭제 등) 대비 — 설치본은 로컬에 있으므로 sim 서버로 폴백
+    var localUrl = (_pubWorld && url.indexOf(_pubWorld.base + 'meshes/') === 0)
+      ? '/sim/meshes/' + url.slice((_pubWorld.base + 'meshes/').length) : null;
+    // DEV corner (dirty tree → sim-assets tag 없음): CDN dae 는 공용
+    // ../world_builder/ 텍스처에 닿을 수 없다 — 재작성은 sim-assets host 가
+    // 필요하고 r86 로더는 절대 URL 을 못 쓴다. 설치본이 어차피 로컬에 있으니
+    // 로컬 dae 를 우선 파싱한다 (상대 등반이 이 서버의 공용 디렉토리로
+    // 자연 해석 → 검정 바닥 없음).
+    var primary = (localUrl && !_simAssets) ? localUrl : url;
     // 다운로드(fetch, 병렬·프리페치 재사용)와 파싱(_enqueueParse, 직렬)을 분리
-    (_prefetched[url] || fetch(url)
+    ((primary === url && _prefetched[url]) || fetch(primary)
       .then(function(r) {
-        if (!r.ok) { throw new Error('HTTP ' + r.status + ': ' + url); }
+        if (!r.ok) { throw new Error('HTTP ' + r.status + ': ' + primary); }
         return r.text();
       }))
-      .then(function(text) {
+      .then(function(text) { return { text: text, src: primary }; })
+      .catch(function(e) {
+        if (primary !== url || !localUrl) { throw e; }
+        return fetch(localUrl).then(function(r) {
+          if (!r.ok) { throw new Error('HTTP ' + r.status + ': ' + localUrl); }
+          return r.text().then(function(t) { return { text: t, src: localUrl }; });
+        });
+      })
+      .then(function(res) {
+        var text = res.text;
+        var src = res.src;
+        // 공용 트랙 텍스처(../world_builder/textures/*)는 월드 rev 업로드에 없다
+        // (설치 계약 — sim 내장 공용 디렉토리 참조). CDN DAE 를 파싱할 땐 이 참조를
+        // 같은 호스트의 공용 자산 경로(sim-assets, 전 월드 캐시 공유)로 재작성한다.
+        // r86 ColladaLoader 는 init_from 을 baseUrl 에 무조건 이어붙이므로 절대 URL 은
+        // 못 쓴다 — ../ 등반 상대경로(worlds/<id>/<rev>/meshes/<track>/ = 5단계)로 붙이고
+        // 최종 정규화는 브라우저 fetch 가 한다. sim-assets 미가용 코너에선 재작성하지
+        // 않는다 (404 → _dropDeadTextures 가 단색 강등).
+        if (_pubWorld && src.indexOf(_pubWorld.base) === 0 && _simAssets) {
+          var simPath = _simAssets.replace(/^https?:\/\/[^/]+/, '');
+          text = text.split('../world_builder/')
+            .join('../../../../..' + simPath + 'meshes/world_builder/');
+        }
         _enqueueParse(function() {
           // FRESH loader per file — THREE's ColladaLoader is not reentrant
           // (parse state lives on the instance, and world-builder daes reuse
@@ -2427,7 +2403,7 @@ var gzScene = GzScene.create({
           new THREE.ColladaLoader().parse(text, function(collada) {
             _tessellateGiantGround(collada.scene);
             onLoad(collada.scene);
-          }, url);
+          }, src);
         });
       })
       .catch(function(e) { if (onError) { onError(e); } });
