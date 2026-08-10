@@ -199,7 +199,7 @@ def _delete_world_files(world_name):
 # 무료·egress 캡 무관). 로컬 배치는 tar 임포트와 동일한 custom_* 관례 —
 # 원본이 R2 에 있으므로 로컬은 캐시이며, rev 가 같으면 재다운로드를 건너뛴다.
 WORLDS_CDN = os.environ.get("PHYSICAR_WORLDS_URL", "https://worlds.physicar.ai")
-_INSTALL_SUBDIRS = ("worlds/", "meshes/", "models/", "routes/", "track_iconography/")
+_INSTALL_SUBDIRS = ("worlds/", "meshes/", "models/", "routes/", "track_iconography/", "evaluations/")
 
 class _InstallError(Exception):
     def __init__(self, code, msg):
@@ -218,7 +218,7 @@ def _pub_sidecar(world_name):
 
 def _eval_sidecar_path(world_name):
     """월드별 평가 문서 — 전용 폴더 share/evaluations/<월드명>.json.
-    (번들 루트의 evaluation.json 을 월드 이름에 매어 보관 — worlds/ 를 어지럽히지 않는다)"""
+    (번들의 evaluations/<월드명>.json 이 일반 설치 루프로 그대로 여기 배치된다)"""
     return os.path.join(SHARE_DIR, "evaluations", f"{world_name}.json")
 
 def _eval_config(world_name):
@@ -269,10 +269,12 @@ def _install_published_world(world_id):
         # by an older sim has no evaluation sidecar, and without this backfill
         # a reinstall could never bring the evaluation in. Fetch just that one
         # file when the manifest lists it and the sidecar is missing.
-        if "evaluation.json" in files and not os.path.isfile(_eval_sidecar_path(world_name)):
+        eval_src = next((p for p in files if isinstance(p, str)
+                         and p.startswith("evaluations/") and _safe_install_path(p)), None)
+        if eval_src and not os.path.isfile(_eval_sidecar_path(world_name)):
             tmp_eval = _eval_sidecar_path(world_name) + ".tmp"
             os.makedirs(os.path.dirname(tmp_eval), exist_ok=True)
-            with urllib.request.urlopen(f"{WORLDS_CDN}/worlds/{world_id}/{rev}/evaluation.json",
+            with urllib.request.urlopen(f"{WORLDS_CDN}/worlds/{world_id}/{rev}/{eval_src}",
                                         timeout=30) as r, open(tmp_eval, "wb") as f:
                 shutil.copyfileobj(r, f, 1024 * 256)
             os.replace(tmp_eval, _eval_sidecar_path(world_name))
@@ -280,13 +282,9 @@ def _install_published_world(world_id):
         return {"ok": True, "world": f"{world_name}.world", "name": display, "cached": True}
 
     paths = []
-    has_eval = False
     for p in files:
         if p == "project.json":
             continue  # 소스 파일 — 설치 대상 아님
-        if p == "evaluation.json":
-            has_eval = True  # 번들 루트 파일 — 월드별 사이드카로 별도 배치
-            continue
         sp = _safe_install_path(p)
         if sp is None:
             # 모르는 디렉토리/확장자는 조용히 스킵 — 새 매니페스트와의 전방 호환
@@ -305,19 +303,11 @@ def _install_published_world(world_id):
             with urllib.request.urlopen(f"{WORLDS_CDN}/worlds/{world_id}/{rev}/{p}", timeout=30) as r, \
                  open(dst, "wb") as f:
                 shutil.copyfileobj(r, f, 1024 * 256)
-        if has_eval:
-            with urllib.request.urlopen(f"{WORLDS_CDN}/worlds/{world_id}/{rev}/evaluation.json", timeout=30) as r, \
-                 open(os.path.join(tmp, "evaluation.json"), "wb") as f:
-                shutil.copyfileobj(r, f, 1024 * 256)
         _delete_world_files(world_name)
         for p in paths:
             dst = os.path.join(SHARE_DIR, p)
             os.makedirs(os.path.dirname(dst), exist_ok=True)
             os.replace(os.path.join(tmp, p), dst)
-        if has_eval:
-            dst_eval = _eval_sidecar_path(world_name)
-            os.makedirs(os.path.dirname(dst_eval), exist_ok=True)
-            os.replace(os.path.join(tmp, "evaluation.json"), dst_eval)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
