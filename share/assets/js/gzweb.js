@@ -75,9 +75,12 @@ var _audioOverlayCheck = setInterval(function() {
 // Status Overlay — free text pushed by user scripts (POST /sim/api/overlay)
 // =====================================================================
 var _statusOverlayLast = '';
-function _applyOverlayText(text) {
+var _statusOverlaySeq = null;
+function _applyOverlayText(text, seq) {
   text = text || '';
-  if (text === _statusOverlayLast) return;
+  var fresh = (seq !== undefined && seq !== _statusOverlaySeq);
+  if (seq !== undefined) { _statusOverlaySeq = seq; }
+  if (text === _statusOverlayLast && !fresh) return;
   _statusOverlayLast = text;
   var el = document.getElementById('status-overlay');
   if (!el) {
@@ -87,6 +90,14 @@ function _applyOverlayText(text) {
   }
   el.textContent = text;
   el.classList.toggle('show', !!text);
+  // New POST arrived (the server bumps overlay_seq even for identical text,
+  // e.g. the same +5s penalty repeating) — restart the pulse so it reads as
+  // a fresh value, not a stale banner.
+  if (text && fresh) {
+    el.classList.remove('pulse');
+    void el.offsetWidth;   // restart the CSS animation
+    el.classList.add('pulse');
+  }
 }
 // 오버레이·밝기는 SSE(/sim/api/events) 푸시로 받는다 — HTTP 폴링 금지.
 // (모든 요청이 게이트웨이 Worker 를 지나므로 폴링은 유저 규모에서 비용 직격)
@@ -99,7 +110,7 @@ function _applyOverlayText(text) {
   es.addEventListener('state', function (ev) {
     var d;
     try { d = JSON.parse(ev.data); } catch (e) { return; }
-    if (typeof d.overlay === 'string') { _applyOverlayText(d.overlay); }
+    if (typeof d.overlay === 'string') { _applyOverlayText(d.overlay, d.overlay_seq); }
     if (typeof d.brightness === 'number') { _applyRemoteBrightness(d.brightness); }
     if (Array.isArray(d.lights)) { _applyLightsSnapshot(d.lights); }
   });
@@ -212,6 +223,8 @@ function connect() {
     // Sync world list on every (re)connect
     loadWorlds();
     _refreshWorldPub();   // 월드 전환 = WS 재연결 — CDN 매핑도 함께 갱신
+    _objectsCatalog = null;   // 월드가 바뀌었을 수 있음 — 다음 패널 오픈 때 재로드
+    _routeSpawn = null;
     _refreshLights();
     _loadGridBounds();
   });
@@ -361,9 +374,16 @@ function connect() {
     }
     
     gz.on("scene", handleSceneWithRetry);
-    
+
     if (_worlds.length > 0) {
-      gz.socket.send(buildMsg(["scene", currentWorld, "", ""]));
+      // 첫 씬 요청은 CDN 매핑(worldpub + complete.json) 확정 뒤에 — 확정 전에
+      // 메시 URL 을 정하면 CDN 이 살아 있어도 "미정 = 로컬" 로 굳어 터널 경유
+      // 저속 로드가 되고, 공용 텍스처 재작성도 빠져 검정 바닥이 된다.
+      (_worldPubReady || Promise.resolve()).then(function() {
+        if (gz && gz.socket && gz.socket.readyState === 1) {
+          gz.socket.send(buildMsg(["scene", currentWorld, "", ""]));
+        }
+      });
       var sceneRefreshPending = false;
       
       new Topic({ gz: gz, name: "/world/"+_worlds[0]+"/dynamic_pose/info",
@@ -1023,7 +1043,42 @@ function _applyLightVisuals() {
       });
     }
     _placeLightOverlays(name, l);
+    _syncYellowDisk(name, l);
   });
+}
+
+// ── 노랑 램프 — 뷰어 자체 원반 ──
+// 카메라가 보는 노랑은 서버가 스왑한 모델의 lamp_yellow visual 이지만, 뷰어
+// 씬의 모델은 스왑되지 않는다(동명 교체는 스트림에 안 잡힘). red/green 은
+// 재질 색칠로 해결되지만 노랑은 전용 램프 메시가 없어서, 패널 앵커(panel
+// px/pz/pitch/lamp_r)로 뷰어가 직접 원반을 그린다. 구세대 월드의
+// <name>_yellow 오버레이 모델 의존은 새 빌더 월드에 그 모델이 없어 폐기.
+var _yellowDisks = {};
+function _syncYellowDisk(name, l) {
+  var model = scene.getByName(name);
+  var pn = l && l.panel;
+  var on = !!(l && l.state === 'yellow' && pn && model);
+  var d = _yellowDisks[name];
+  if (!on) { if (d) { d.visible = false; } return; }
+  if (!d) {
+    var geo = new THREE.CircleGeometry(pn.lamp_r || 0.028, 20);
+    geo.rotateY(Math.PI / 2);   // face along +x of the light frame (panel normal)
+    d = new THREE.Mesh(geo, new THREE.MeshBasicMaterial(
+      { color: 0xffcc00, side: THREE.DoubleSide }));
+    d.name = 'PC_YELLOW_' + name;
+    d.raycast = function() {};
+    _yellowDisks[name] = d;
+  }
+  // red/green 과 같은 원칙: 본체의 일부여야 한다. 모델의 자식으로 붙여
+  // 로컬 패널 앵커에 고정 — 밀리든 넘어지든 본체와 함께 움직인다.
+  if (d.parent !== model) {
+    if (d.parent) { d.parent.remove(d); }
+    model.add(d);
+    d.position.set(pn.px + 0.002, 0, pn.pz);   // +2mm — 패널 표면 z-fighting 회피
+    var sp = Math.sin((pn.pitch || 0) / 2), cp = Math.cos((pn.pitch || 0) / 2);
+    d.quaternion.set(0, sp, 0, cp);   // qy(pitch) — yaw/전복은 부모가 담당
+  }
+  d.visible = true;
 }
 
 // 오버레이 즉시 배치 — gz 포즈 스트림은 ~1초 늦게 도착하므로, 상태를 안 순간
@@ -1099,21 +1154,135 @@ function _lightTarget(stand, name) {
 
 function _onSelect(sel) {
   if (sel.kind === 'light') {
+    _hideObjectPanel();
     _showLightPanel(sel.name);
   } else {
+    // world objects AND the vehicle share the info panel — the vehicle's
+    // "origin" is its spawn point (route start), Reset teleports it there
     _hideLightPanel();
+    _showObjectPanel(sel.name, sel.kind === 'vehicle');
   }
 }
 
 function _onDeselect() {
   _hideLightPanel();
+  _hideObjectPanel();
+}
+
+// ── 물체/차량 정보 패널 (우측 하단) — 라이브 포즈 + origin 리셋 ──
+var _selObject = null;
+var _selObjectIsVehicle = false;
+var _objPanelTimer = null;
+var _objectsCatalog = null;   // name -> {origin, movable, type} — 월드당 1회 로드
+var _routeSpawn = null;       // 차량 스폰 포즈 = 루트 시작점 (wp0, wp1 방향)
+
+function _loadObjectsCatalog() {
+  return fetch('/sim/api/objects').then(function(r) { return r.json(); })
+    .then(function(d) {
+      _objectsCatalog = {};
+      (d.objects || []).forEach(function(o) { _objectsCatalog[o.name] = o; });
+      return _objectsCatalog;
+    }).catch(function() { return _objectsCatalog = {}; });
+}
+
+function _loadRouteSpawn() {
+  return fetch('/sim/api/route').then(function(r) { return r.json(); })
+    .then(function(d) {
+      var w = d.waypoints || [];
+      if (w.length > 1) {
+        _routeSpawn = { x: w[0][0], y: w[0][1],
+                        yaw: Math.atan2(w[1][1] - w[0][1], w[1][0] - w[0][0]) };
+      }
+      return _routeSpawn;
+    }).catch(function() { return null; });
+}
+
+function _showObjectPanel(name, isVehicle) {
+  _selObject = name;
+  _selObjectIsVehicle = !!isVehicle;
+  document.getElementById('object-panel').classList.add('show');
+  document.getElementById('op-name').textContent = name;
+  if (isVehicle) {
+    if (!_routeSpawn) { _loadRouteSpawn().then(function() { _renderObjectPanel(); }); }
+  } else {
+    var p = _objectsCatalog ? Promise.resolve(_objectsCatalog) : _loadObjectsCatalog();
+    p.then(function() { _renderObjectPanel(); });
+  }
+  _renderObjectPanel();
+  if (_objPanelTimer) { clearInterval(_objPanelTimer); }
+  _objPanelTimer = setInterval(_renderObjectPanel, 400);
+}
+
+function _hideObjectPanel() {
+  _selObject = null;
+  if (_objPanelTimer) { clearInterval(_objPanelTimer); _objPanelTimer = null; }
+  document.getElementById('object-panel').classList.remove('show');
+}
+
+function _renderObjectPanel() {
+  if (!_selObject) { return; }
+  var e = scene.getByName(_selObject);
+  if (e) {
+    var q = e.quaternion;
+    var yaw = Math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z));
+    document.getElementById('op-x').textContent = e.position.x.toFixed(2) + ' m';
+    document.getElementById('op-y').textContent = e.position.y.toFixed(2) + ' m';
+    document.getElementById('op-yaw').textContent = Math.round(yaw * 180 / Math.PI) + '°';
+  }
+  var o = _selObjectIsVehicle
+    ? _routeSpawn
+    : ((_objectsCatalog && _objectsCatalog[_selObject]) || {}).origin;
+  var canReset = _selObjectIsVehicle
+    ? !!_routeSpawn
+    : !!(o && (_objectsCatalog[_selObject] || {}).movable);
+  document.getElementById('op-origin').textContent =
+    o ? o.x.toFixed(2) + ', ' + o.y.toFixed(2) : '–';
+  document.getElementById('op-reset').style.display = canReset ? '' : 'none';
+}
+
+function resetObjectToOrigin() {
+  var name = _selObject;
+  if (!name) { return; }
+  var btn = document.getElementById('op-reset');
+  var url, body;
+  if (_selObjectIsVehicle) {
+    if (!_routeSpawn) { return; }
+    // vehicle Reset = teleport to the spawn point (pose API rights it upright)
+    url = '/sim/api/pose';
+    body = { x: _routeSpawn.x, y: _routeSpawn.y, yaw: _routeSpawn.yaw };
+  } else {
+    var cat = _objectsCatalog && _objectsCatalog[name];
+    if (!cat || !cat.origin) { return; }
+    // z on purpose omitted — the server grounds non-static objects upright,
+    // so a fallen object comes back standing at its origin.
+    url = '/sim/api/models/' + encodeURIComponent(name) + '/pose';
+    body = { x: cat.origin.x, y: cat.origin.y, yaw: cat.origin.yaw || 0 };
+  }
+  btn.disabled = true;
+  fetch(url, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  }).then(function(r) { return r.json(); })
+    .then(function(d) {
+      btn.disabled = false;
+      if (!d.ok) { _showToast(d.error || 'Reset failed'); }
+    })
+    .catch(function() { btn.disabled = false; _showToast('Reset failed'); });
 }
 
 // 조작 확정 — 놓는 순간 pose API 호출 (WB commitManipulation의 sim 구현)
 function _commitPose(sel, pose) {
   var names = [sel.name].concat((sel.attachments || []).map(function(o) { return o.name; }));
   names.forEach(function(n) { _poseHold[n] = Date.now() + 3000; });
-  function release() { names.forEach(function(n) { delete _poseHold[n]; }); }
+  function release() {
+    names.forEach(function(n) {
+      delete _poseHold[n];
+      // The playout ring kept buffering the PRE-move stream poses during the
+      // drag — without flushing, the entity flashes back to its old pose (A)
+      // for ~100 ms before the post-commit samples (B) play out.
+      delete _poseLerp[n];
+    });
+  }
   var url, body;
   if (sel.kind === 'vehicle') {
     url = "/sim/api/pose";
@@ -1659,6 +1828,21 @@ function _getVehicleYaw(obj) {
 function toggleSettings() {
   var menu = document.getElementById("settings-menu");
   menu.classList.toggle("open");
+}
+
+function doReset() {
+  var btn = document.getElementById('reset-btn');
+  if (btn.classList.contains('busy')) return;
+  btn.classList.add('busy');
+  // Pose-only return to start (server confirms application before replying)
+  // — the scene, the sensors and the ws all stay untouched.
+  fetch('/sim/api/reset', { method: 'POST' })
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      btn.classList.remove('busy');
+      if (!d.ok) { _showToast(d.error || 'Reset failed'); }
+    })
+    .catch(function() { btn.classList.remove('busy'); _showToast('Reset failed'); });
 }
 
 function doRespawn() {
@@ -2265,8 +2449,12 @@ var _pubWorld = null;    // { world, base } — 현재 월드가 배포본일 �
 var _simAssets = null;   // 공식 자산 CDN base — complete.json 확인 후에만
 var _simAssetsTag = null;
 var _cdnBase = 'https://worlds.physicar.ai';   // 전환 프리페치가 meta.json 조회에 사용
+// 씬 구축은 이 매핑이 확정된 뒤에만 시작한다 (_worldPubReady 게이트).
+// 확정 전에 메시 URL 을 정하면 CDN 이 살아 있어도 "미정 = 로컬" 로 굳어
+// 터널 경유 저속 로드가 되고, 공용 텍스처 재작성도 빠져 검정 바닥이 된다.
+var _worldPubReady = null;
 function _refreshWorldPub() {
-  fetch('/sim/api/worldpub').then(function(r) { return r.json(); })
+  _worldPubReady = fetch('/sim/api/worldpub').then(function(r) { return r.json(); })
     .then(function(d) {
       var cdn = (d && d.cdn) || 'https://worlds.physicar.ai';
       _cdnBase = cdn;
@@ -2279,10 +2467,11 @@ function _refreshWorldPub() {
       _simAssetsTag = tag;
       var base = cdn + '/sim-assets/' + tag + '/';
       // 커밋 포인트 확인 — 이 태그가 R2 에 실제 업로드됐을 때만 CDN 사용 (아니면 로컬)
-      fetch(base + 'complete.json')
+      return fetch(base + 'complete.json')
         .then(function(r) { _simAssets = r.ok ? base : null; })
         .catch(function() { _simAssets = null; });
     }).catch(function() { _pubWorld = null; _simAssets = null; _simAssetsTag = null; });
+  return _worldPubReady;
 }
 _refreshWorldPub();
 
