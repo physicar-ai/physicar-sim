@@ -17,8 +17,8 @@
       'assets/lib/gz3d.js?v=2',
       'assets/js/gz-scene.js?v=4',
       'assets/js/gz-interact.js?v=4',
-      'assets/js/gzweb.js?v=68',
-      'assets/js/evaluation.js?v=22'
+      'assets/js/gzweb.js?v=69',
+      'assets/js/evaluation.js?v=24'
     ];
     var ready = { dom: document.readyState !== 'loading', js: false };
     function maybeInit() {
@@ -56,7 +56,7 @@
         <span class="b-line"><input type="range" id="brightness-slider" min="0.2" max="2" step="0.1" value="1"
           oninput="setBrightness(this.value)"><span id="brightness-val">1.0</span></span></label>
       <button id="reset-btn" onclick="doReset()" title="Put every object and the car back at its start pose — instant, no world reload">
-        <span class="respawn-icon">&#x21ba;</span>Reset</button>
+        <span class="respawn-icon">&#x21ba;</span>Reset Positions</button>
       <button id="respawn-btn" onclick="doRespawn()" title="Reload the whole world — use when the world misbehaves" disabled>
         <span class="respawn-icon">&#x21bb;</span>Reload World</button>
     </div>

@@ -636,17 +636,65 @@ try:
 except Exception:
     _gz_node = None
 _gz_node_lock = threading.Lock()
+_gz_node_wedged = False   # gz-transport request() can ignore its timeout when the
+                          # server dies mid-request (seen live 2026-08-10: one /pose
+                          # handler parked forever INSIDE request() while holding the
+                          # node lock — everything queued behind it, and the watchdog's
+                          # transport probe then "diagnosed" a dead gz and restarted a
+                          # healthy sim). Once a request overshoots its own timeout the
+                          # node is treated as wedged: the in-process path is disabled
+                          # and every caller falls back to the CLI (~340 ms but alive).
 
 def _gz_request(service, req, req_type, rep_type, timeout_ms=2000):
     """In-process service request; None on failure (caller falls back to CLI)."""
-    if _gz_node is None:
+    global _gz_node_wedged
+    if _gz_node is None or _gz_node_wedged:
         return None
+    grace = timeout_ms / 1000 + 1.0
+    if not _gz_node_lock.acquire(timeout=grace):
+        return None            # node busy past its own timeout — fall back
     try:
-        with _gz_node_lock:
-            ok, rep = _gz_node.request(service, req, req_type, rep_type, timeout_ms)
+        box = []
+
+        def _call():
+            try:
+                box.append(_gz_node.request(service, req, req_type, rep_type, timeout_ms))
+            except Exception:
+                box.append((False, None))
+
+        t = threading.Thread(target=_call, daemon=True)
+        t.start()
+        t.join(grace)
+        if not box:
+            _gz_node_wedged = True
+            logging.warning("gz node request wedged past its timeout (%s) — "
+                            "in-process transport disabled, CLI fallback on", service)
+            return None
+        ok, rep = box[0]
         return rep if ok else None
     except Exception:
         return None
+    finally:
+        try:
+            _gz_node_lock.release()
+        except RuntimeError:
+            pass
+
+
+def _gz_node_recover():
+    """After a successful world (re)start, replace a wedged transport node with
+    a fresh one — the stuck request belongs to the dead server and a new node
+    restores the fast in-process path."""
+    global _gz_node, _gz_node_wedged
+    if not _gz_node_wedged:
+        return
+    try:
+        node = _GzTNode()
+    except Exception:
+        return
+    _gz_node = node
+    _gz_node_wedged = False
+    logging.info("gz transport node recreated after wedge — in-process path restored")
 
 # ── live gz stream cache (poses + clock) ───────────────────────────────────
 # /pose and /objects used to spawn a `gz topic -e -n 1` process per request
@@ -1582,6 +1630,7 @@ def start_sim(world_file):
                     subprocess.run(["pkill", "-f", "ros_gz_bridge/parameter_bridge"],
                                    timeout=5, capture_output=True)
                     logging.info("ros_gz bridge restarted against the new world")
+                    _gz_node_recover()
                 finally:
                     with _lock:
                         _switching = False
