@@ -490,44 +490,12 @@ function init() {
   cam.near = 0.2; cam.far = 2000; cam.updateProjectionMatrix();
   scene.scene.fog = null;
 
-  // Ground-stack separation WITHOUT polygonOffset. The old offset pass made
-  // fragments vanish wholesale on Windows/ANGLE at oblique angles (offset
-  // scales with the on-screen depth slope). Instead, physically lift the
-  // track's decal layers apart: sort the thin flat track meshes by their
-  // baked z and give each layer a real 0.5mm step via mesh.position.z.
-  // Sub-mm gaps in the exports (road 0.1mm over field, lines 0.03mm over
-  // road) are below depth precision at a distance and shimmer otherwise.
-  // Track meshes sit at the world origin with identity transforms; anything
-  // positioned elsewhere (vehicle, cones, handles) is left alone.
-  function applyDecalLift() {
-    try {
-      var flats = [];
-      var wp = new THREE.Vector3();
-      scene.scene.traverse(function (o) {
-        if (!o.isMesh || !o.geometry || !o.material || Array.isArray(o.material)) return;
-        if (o.renderOrder > 900) return;                      // UI overlays
-        var g = o.geometry;
-        if (!g.boundingBox) g.computeBoundingBox();
-        var bb = g.boundingBox;
-        if (!bb) return;
-        var h = bb.max.z - bb.min.z;
-        var area = (bb.max.x - bb.min.x) * (bb.max.y - bb.min.y);
-        if (h >= 0.01 || area < 0.05) return;
-        if (bb.min.z < -0.1 || bb.min.z > 0.05) return;
-        o.getWorldPosition(wp);
-        wp.z -= o.position.z;                                 // ignore our own lift
-        if (Math.abs(wp.x) > 0.01 || Math.abs(wp.y) > 0.01 || Math.abs(wp.z) > 0.01) return;
-        flats.push({ o: o, z: bb.min.z, area: area });
-      });
-      if (flats.length < 2) return;
-      flats.sort(function (a, b) { return (a.z - b.z) || (b.area - a.area); });
-      var base = flats[0].z;
-      flats.forEach(function (f, i) {
-        var lift = (base + i * 0.0005) - f.z;
-        if (Math.abs(f.o.position.z - lift) > 1e-6) f.o.position.z = lift;
-      });
-    } catch (e) { /* 방어적 — 뷰어 본연 동작엔 영향 금지 */ }
-  }
+  // (구) Ground-stack 리프트 제거 — 뷰어는 파일에 적힌 z 그대로 그린다.
+  // 예전엔 익스포트가 0.03~0.1mm 초미세 간격으로 구워서 뷰어가 평면들을 메시당
+  // 0.5mm 씩 물리로 벌려야 했는데, 그 방식은 "자기보다 낮은 z 의 평면 개수 × 0.5mm"
+  // 로 쌓여 이미지 40장 월드에서 아웃라인이 ~17mm 떠 보이는 결함을 만들었다
+  // (실사례 870d5092…). 이제 트랙 dae 와 wb-export 가 층당 0.2mm(트랙 묶음은
+  // 도로/라인/출발선 3칸) 실간격을 파일에 직접 굽는다 — 렌더러 보정 불필요, 빌더와 동일.
 
   // Max anisotropic filtering on every texture. At oblique view angles the
   // GPU falls back to deep mip levels; with anisotropy=1 (three.js default)
@@ -567,7 +535,7 @@ function init() {
       });
     });
   }
-  function _groundUpkeep() { applyDecalLift(); applyTextureAniso(); applyViewerBrightness(); _dropDeadTextures(); }
+  function _groundUpkeep() { applyTextureAniso(); applyViewerBrightness(); _dropDeadTextures(); }
   setTimeout(_groundUpkeep, 3000);
   setInterval(_groundUpkeep, 5000);
   cam.position.x = 0; cam.position.y = -1.2; cam.position.z = 0.6;

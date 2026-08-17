@@ -507,7 +507,7 @@
         </instance_geometry>
       </node>
       <node id="road" name="road" type="NODE">
-        <matrix sid="transform">1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1</matrix>
+        <matrix sid="transform">1 0 0 0 0 1 0 0 0 0 1 0.0001 0 0 0 1</matrix>
         <instance_geometry url="#road-mesh" name="road">
           <bind_material><technique_common>
             <instance_material symbol="road_mat-material" target="#road_mat-material">
@@ -517,7 +517,7 @@
         </instance_geometry>
       </node>
       <node id="outer_line" name="outer_line" type="NODE">
-        <matrix sid="transform">1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1</matrix>
+        <matrix sid="transform">1 0 0 0 0 1 0 0 0 0 1 0.00027 0 0 0 1</matrix>
         <instance_geometry url="#ol_001-mesh" name="outer_line">
           <bind_material><technique_common>
             <instance_material symbol="ol_mat-material" target="#ol_mat-material">
@@ -527,7 +527,7 @@
         </instance_geometry>
       </node>
       <node id="inner_line" name="inner_line" type="NODE">
-        <matrix sid="transform">1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1</matrix>
+        <matrix sid="transform">1 0 0 0 0 1 0 0 0 0 1 0.00027 0 0 0 1</matrix>
         <instance_geometry url="#il_001-mesh" name="inner_line">
           <bind_material><technique_common>
             <instance_material symbol="il_mat-material" target="#il_mat-material">
@@ -537,7 +537,7 @@
         </instance_geometry>
       </node>
       <node id="center_line" name="center_line" type="NODE">
-        <matrix sid="transform">1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1</matrix>
+        <matrix sid="transform">1 0 0 0 0 1 0 0 0 0 1 0.00027 0 0 0 1</matrix>
         <instance_geometry url="#cl_001-mesh" name="center_line">
           <bind_material><technique_common>
             <instance_material symbol="cl_mat-material" target="#cl_mat-material">
@@ -547,7 +547,7 @@
         </instance_geometry>
       </node>
       <node id="start_line" name="start_line" type="NODE">
-        <matrix sid="transform">1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1</matrix>
+        <matrix sid="transform">1 0 0 0 0 1 0 0 0 0 1 0.00044 0 0 0 1</matrix>
         <instance_geometry url="#start_line-mesh" name="start_line">
           <bind_material><technique_common>
             <instance_material symbol="start_line_mat-material" target="#start_line_mat-material">
@@ -557,7 +557,7 @@
         </instance_geometry>
       </node>
       <node id="image_2" name="image_2" type="NODE">
-        <matrix sid="transform">1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1</matrix>
+        <matrix sid="transform">1 0 0 0 0 1 0 0 0 0 1 0.0006 0 0 0 1</matrix>
         <instance_geometry url="#image_2-mesh" name="image_2">
           <bind_material><technique_common>
             <instance_material symbol="image_2_mat-material" target="#image_2_mat-material">
@@ -567,7 +567,7 @@
         </instance_geometry>
       </node>
       <node id="image_1" name="image_1" type="NODE">
-        <matrix sid="transform">1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1</matrix>
+        <matrix sid="transform">1 0 0 0 0 1 0 0 0 0 1 0.0007 0 0 0 1</matrix>
         <instance_geometry url="#image_1-mesh" name="image_1">
           <bind_material><technique_common>
             <instance_material symbol="image_1_mat-material" target="#image_1_mat-material">
@@ -577,7 +577,7 @@
         </instance_geometry>
       </node>
       <node id="image_0" name="image_0" type="NODE">
-        <matrix sid="transform">1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1</matrix>
+        <matrix sid="transform">1 0 0 0 0 1 0 0 0 0 1 0.0008 0 0 0 1</matrix>
         <instance_geometry url="#image_0-mesh" name="image_0">
           <bind_material><technique_common>
             <instance_material symbol="image_0_mat-material" target="#image_0_mat-material">
